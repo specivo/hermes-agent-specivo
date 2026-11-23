@@ -13,6 +13,9 @@ This is a native [Hermes Agent](https://github.com/NousResearch/hermes-agent) pl
 - **Kanban sync (optional).** Open Specivo issues become Hermes Kanban cards. A claimed card moves
   its issue to In Progress, a completed card posts its summary and resolves the issue, and a
   blocked card posts the reason and moves the issue to Feedback.
+- **Memory provider (optional).** With `memory.provider: specivo`, Hermes recalls matching Specivo
+  issues and wiki pages before each turn, and the agent can save curated notes to a wiki page or an
+  issue comment. It never stores conversation turns.
 - **`hermes specivo doctor`.** It checks the configuration, the API key, MCP access and the receiver.
 
 Requirements: Hermes Agent 0.23.3 or later and Specivo 0.15.0 or later. The plugin uses only the
@@ -245,18 +248,91 @@ Any other card or hook is ignored and a warning is logged. If the proof comment 
 the plugin retries on the next tick. Rotating the API key invalidates the signatures on existing
 cards, so only the profile that created those cards can still act on them.
 
+## Memory provider
+
+The plugin also offers a Hermes memory provider. It is off until you select it:
+
+```yaml
+memory:
+  provider: specivo
+plugins:
+  entries:
+    specivo:
+      settings:
+        url: https://your-specivo-host
+        default_project: ACME
+        memory:
+          project: ACME                              # optional; see "Which project" below
+          cwd_projects: {"/srv/work/acme": "ACME"}
+          chat_projects: {"telegram:12345": "OPS"}
+          notes_page: Agent Notes
+          max_hits: 5                                # 1 to 10
+          max_chars: 1800                            # 200 to 8000
+          mirror_builtin: false
+```
+
+You can also pick it with `hermes memory setup`, which asks for `project`, `notes_page`,
+`max_hits` and `max_chars`. The provider needs the plugin's `url` and `SPECIVO_API_KEY`; it reads
+both from the same places as the rest of the plugin. Restart Hermes after changing the selection.
+
+What it does:
+
+- **Recall.** Before each turn Hermes asks the provider for context. The provider runs a hybrid
+  (keyword and semantic) Specivo search with your last message and returns at most `max_hits`
+  hits and `max_chars` characters: one line per issue, wiki page or comment, with a short snippet
+  and a link. Searches run in the background after a turn and are used on the next one. On the
+  first turn of a session the provider searches right away and waits at most two seconds. Short
+  replies ("ok", "thanks") and slash commands are not searched. If Specivo is slow or down, the turn
+  goes on without recall and the provider logs one line; it never blocks or fails a turn.
+- **`specivo_remember`** (`text`, `kind`: note, decision or fact, optional `issue_ref`). This tool
+  appends a dated line under today's `## YYYY-MM-DD` heading of the project's notes page
+  (`notes_page`, created on first use). With `issue_ref` it posts an issue comment instead. Notes
+  are limited to 2,000 characters. The tool is refused in cron runs, subagents and the
+  pre-compression flush.
+- **`specivo_recall`** (`query`, `scope`: project or all, `limit` up to 10). An explicit search that
+  returns results in the same short format.
+- **Mirror (off by default).** With `mirror_builtin: true`, additions and replacements in Hermes's
+  built-in MEMORY.md and USER.md are also appended under `## Memory mirror` on the notes page.
+
+Which project: `memory.project`, else the longest `memory.cwd_projects` prefix of the session's
+working directory, else `memory.chat_projects` for `<platform>:<chat id>`, else `default_project`.
+With no project, there is no recall and the tools say what to set.
+
+Things to know before you choose it:
+
+- **One external memory provider per profile.** Hermes runs its built-in memory (MEMORY.md and
+  USER.md) next to one external provider. Selecting `specivo` means not using Mem0, Honcho or
+  another external provider in that profile.
+- **Permissions are Specivo's.** The provider acts as the API key's account. Search returns only
+  what that account may see, including the key's project limit. Notes need permission to edit wiki
+  pages in the project, and comments need permission to add issue notes. Refusals come back to the
+  agent as a tool error. Specivo records each search in its audit log (one per turn), and the notes
+  page history shows the account's edits.
+- **Recalled text is reference material.** Issue and wiki text is written by people, so the
+  recall block is labelled as reference material, not instructions.
+- **No turns are stored.** The provider never sends the conversation to Specivo. It sends only the
+  search query, the notes the agent chooses to save, and mirrored memory entries when you turn
+  mirroring on.
+
 ## Privacy and network use
 
 What the plugin sends, and where:
 
-- **Your Specivo server only**, through the MCP server Hermes connects to. The plugin makes no
-  other network calls, except `doctor`'s `GET` on your receiver URL. It has no telemetry.
+- **Your Specivo server only.** The hooks go through the MCP server Hermes connects to. The memory
+  provider, when selected, calls Specivo's REST API (`/api/v1/`) with `SPECIVO_API_KEY`, because
+  Hermes's memory loader gives it no MCP access. The plugin makes no other network calls, except
+  `doctor`'s `GET` on your receiver URL. It has no telemetry.
 - **Session link.** The plugin sends Hermes's session id, the parent session id, and the issue key
   when there is one.
 - **Kanban sync.** The plugin reads issue keys and statuses and puts only the key on a card. It
   posts card summaries and block reasons as issue comments, after Hermes's secret redaction
   (`redact_text` at full strength). If redaction is unavailable or fails, the text is not sent;
   the comment says the summary was withheld.
+- **Memory provider.** The search query is your last message, after Hermes's secret scrub and
+  then the plugin's own redaction, cut to 300 characters. Notes, comments and mirrored memory
+  entries are redacted (`redact_text` at full strength) before they are sent. If redaction is
+  unavailable or fails, nothing is sent: the search is skipped, or the tool answers that the note
+  was not saved, and a line is logged. Conversation turns are never sent.
 - **Webhook.** Hermes itself sends events to the receiver, signed with your webhook secret. The
   Specivo receiver documentation lists the fields it stores.
 - **Local data.** The plugin writes `config.yaml` only when you run `setup` (with a backup), and
@@ -290,7 +366,8 @@ those writes are refused.
 
 ```bash
 uv sync
-make test        # pytest, no network; fakes for ctx, the Specivo MCP server and the Kanban board
+make test        # pytest, no outside network: fakes for ctx, the MCP server and the Kanban board,
+                 # and a stub of the Specivo REST API on 127.0.0.1
 make lint        # ruff and mypy
 make hermes-validate   # the plugin catalog's checks against the pinned Hermes release (needs network)
 ```
