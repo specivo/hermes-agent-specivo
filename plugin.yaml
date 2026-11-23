@@ -1,6 +1,8 @@
 name: specivo
 version: 0.1.0
 manifest_version: 2
+# A plugin with hooks and commands that also offers a memory provider (memory.provider: specivo).
+kind: standalone
 api_version: 1
 description: >-
   Specivo as Hermes's tracker, wiki and cost ledger: one `hermes specivo setup` configures the
@@ -15,7 +17,7 @@ requires_hermes: ">=0.23.3"
 python_dependencies: []
 requires_env:
   - name: SPECIVO_API_KEY
-    description: "Specivo API key (create one in Specivo under your account's API keys). Sent only to your Specivo server's MCP endpoint."
+    description: "Specivo API key (create one in Specivo under your account's API keys). Sent only to your Specivo server: its MCP endpoint, and its REST API when the memory provider is selected."
     secret: true
   - name: SPECIVO_WEBHOOK_SECRET
     description: "Secret of the Hermes receiver you created in Specivo; Hermes signs each event with it."
@@ -56,3 +58,9 @@ config_schema:
     description: >-
       Kanban sync: enabled, project, board, card_assignee, select {assignee, tag}, poll_seconds,
       statuses {in_progress, resolved, feedback}
+  memory:
+    type: dict
+    default: {}
+    description: >-
+      Memory provider (active only with memory.provider: specivo): project, cwd_projects,
+      chat_projects, notes_page, max_hits, max_chars, mirror_builtin

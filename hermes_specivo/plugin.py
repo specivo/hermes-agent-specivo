@@ -1,4 +1,5 @@
-"""``register(ctx)``: wires the hooks, the CLI and slash commands, the prompt section and bundled skills."""
+"""``register(ctx)``: wires the hooks, the CLI and slash commands, the prompt section, bundled skills and
+the optional memory provider."""
 
 from __future__ import annotations
 
@@ -6,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from .kanban_sync import KanbanSync
+from .memory import SpecivoMemoryProvider
 from .runtime import Runtime
 from .session_link import SessionLink
 from .setup_cmd import add_arguments, make_handler
@@ -56,7 +58,30 @@ def register_skills(ctx: Any, skills_dir: Path = SKILLS_DIR) -> list[str]:
     return names
 
 
+def is_memory_loader(ctx: Any) -> bool:
+    """Whether Hermes's memory loader (``plugins/memory``) called ``register``, not the plugin manager.
+
+    That loader's context forwards only ``register_*`` calls: it has no ``get_config``, so the hooks
+    and commands (which need it) are registered only by the plugin manager's own load.
+    """
+    return not callable(getattr(ctx, "get_config", None))
+
+
+def register_memory_provider(ctx: Any) -> SpecivoMemoryProvider | None:
+    """Offer a new provider instance; it becomes active only with ``memory.provider: specivo``."""
+    offer = getattr(ctx, "register_memory_provider", None)
+    if not callable(offer):  # a Hermes without memory providers
+        return None
+    provider = SpecivoMemoryProvider()
+    offer(provider)
+    return provider
+
+
 def register(ctx: Any) -> None:
+    if is_memory_loader(ctx):
+        register_memory_provider(ctx)
+        return
+
     runtime = Runtime(ctx)
     link = SessionLink(runtime)
     sync = KanbanSync(runtime)
@@ -86,3 +111,4 @@ def register(ctx: Any) -> None:
         CONTEXT_SECTION_ID, lambda info: context_section(info, runtime=runtime), max_chars=2000
     )
     register_skills(ctx)
+    register_memory_provider(ctx)

@@ -28,6 +28,17 @@ DEFAULT_STATUSES: dict[str, str] = {
     "feedback": "Feedback",
 }
 
+#: The memory provider's recall budget: Hermes injects the recalled text before every turn.
+DEFAULT_MEMORY_MAX_HITS = 5
+MAX_MEMORY_HITS = 10
+DEFAULT_MEMORY_MAX_CHARS = 1800
+MIN_MEMORY_MAX_CHARS = 200
+MAX_MEMORY_MAX_CHARS = 8000
+DEFAULT_NOTES_PAGE = "Agent Notes"
+MEMORY_KEYS = frozenset(
+    {"project", "cwd_projects", "chat_projects", "notes_page", "max_hits", "max_chars", "mirror_builtin"}
+)
+
 _PROJECT_KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]{0,31}$")
 #: A Hermes Kanban board slug, as ``kanban_db._normalize_board_slug`` accepts it (after lower-casing).
 BOARD_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9\-_]{0,63}$")
@@ -166,6 +177,24 @@ class IssueSyncSettings:
 
 
 @dataclass(frozen=True)
+class MemorySettings:
+    """``memory``: the optional memory provider (active only with ``memory.provider: specivo``)."""
+
+    #: Project recall and notes use; else ``cwd_projects``, ``chat_projects``, then ``default_project``.
+    project: str | None = None
+    #: Working directory prefix -> project key; the longest matching prefix wins.
+    cwd_projects: Mapping[str, str] = field(default_factory=dict)
+    #: ``<platform>:<chat_id>`` -> project key, for gateway chats.
+    chat_projects: Mapping[str, str] = field(default_factory=dict)
+    #: Title of the wiki page ``specivo_remember`` appends to, one per project.
+    notes_page: str = DEFAULT_NOTES_PAGE
+    max_hits: int = DEFAULT_MEMORY_MAX_HITS
+    max_chars: int = DEFAULT_MEMORY_MAX_CHARS
+    #: Mirror Hermes's built-in MEMORY.md and USER.md writes to the notes page (off by default).
+    mirror_builtin: bool = False
+
+
+@dataclass(frozen=True)
 class Settings:
     """Everything the plugin reads from ``plugins.entries.specivo.settings``."""
 
@@ -175,6 +204,7 @@ class Settings:
     context_inject: bool = True
     events_enabled: bool = True
     issue_sync: IssueSyncSettings = field(default_factory=IssueSyncSettings)
+    memory: MemorySettings = field(default_factory=MemorySettings)
 
     def require_url(self) -> str:
         """The base URL, or a :class:`ConfigError` saying how to set it."""
@@ -229,6 +259,54 @@ def _issue_sync(raw: Mapping[str, Any]) -> IssueSyncSettings:
     )
 
 
+def _bounded_int(value: object, key: str, default: int, low: int, high: int) -> int:
+    if value is None:
+        return default
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ConfigError(f"{key} must be a whole number, got {value!r}")
+    if not low <= value <= high:
+        raise ConfigError(f"{key} must be between {low} and {high}, got {value}")
+    return value
+
+
+def _project_map(value: object, key: str) -> dict[str, str]:
+    """A mapping of non-empty strings to project keys."""
+    result: dict[str, str] = {}
+    for name, project in _mapping(value, key).items():
+        if not isinstance(name, str) or not name.strip():
+            raise ConfigError(f"{key} keys must be non-empty strings, got {name!r}")
+        checked = _project_key(project, f"{key}.{name}")
+        if checked is None:
+            raise ConfigError(f"{key}.{name} must name a project key such as ACME")
+        result[name.strip()] = checked
+    return result
+
+
+def _memory(raw: Mapping[str, Any]) -> MemorySettings:
+    prefix = "memory"
+    unknown = sorted(str(k) for k in set(raw) - MEMORY_KEYS)
+    if unknown:
+        raise ConfigError(f"{prefix} has unknown keys {unknown}; use {sorted(MEMORY_KEYS)}")
+    notes_page = _optional_text(raw.get("notes_page"), f"{prefix}.notes_page") or DEFAULT_NOTES_PAGE
+    if len(notes_page) > 255 or not any(ch.isalnum() for ch in notes_page):
+        raise ConfigError(f"{prefix}.notes_page must be a wiki page title of up to 255 characters, got {notes_page!r}")
+    return MemorySettings(
+        project=_project_key(raw.get("project"), f"{prefix}.project"),
+        cwd_projects=_project_map(raw.get("cwd_projects"), f"{prefix}.cwd_projects"),
+        chat_projects=_project_map(raw.get("chat_projects"), f"{prefix}.chat_projects"),
+        notes_page=notes_page,
+        max_hits=_bounded_int(raw.get("max_hits"), f"{prefix}.max_hits", DEFAULT_MEMORY_MAX_HITS, 1, MAX_MEMORY_HITS),
+        max_chars=_bounded_int(
+            raw.get("max_chars"),
+            f"{prefix}.max_chars",
+            DEFAULT_MEMORY_MAX_CHARS,
+            MIN_MEMORY_MAX_CHARS,
+            MAX_MEMORY_MAX_CHARS,
+        ),
+        mirror_builtin=_bool(raw.get("mirror_builtin"), f"{prefix}.mirror_builtin", False),
+    )
+
+
 def load_settings(get: ConfigGetter) -> Settings:
     """Read and validate the plugin's settings; :class:`ConfigError` names the first bad key.
 
@@ -243,6 +321,7 @@ def load_settings(get: ConfigGetter) -> Settings:
     context = _mapping(get("context", None), "context")
     events = _mapping(get("events", None), "events")
     sync = _mapping(get("issue_sync", None), "issue_sync")
+    memory = _mapping(get("memory", None), "memory")
     settings = Settings(
         url=url,
         mcp_server=server,
@@ -250,6 +329,7 @@ def load_settings(get: ConfigGetter) -> Settings:
         context_inject=_bool(context.get("inject"), "context.inject", True),
         events_enabled=_bool(events.get("enabled"), "events.enabled", True),
         issue_sync=_issue_sync(sync),
+        memory=_memory(memory),
     )
     if settings.issue_sync.enabled and settings.sync_project() is None:
         raise ConfigError("issue_sync.enabled is true but no project is set: set issue_sync.project or default_project")
