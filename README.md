@@ -187,17 +187,26 @@ Hermes fires `kanban_task_claimed` in the dispatcher and the other two hooks in 
 which runs as the card's assignee profile. That profile needs the plugin enabled with the same
 `url`, the same `SPECIVO_API_KEY`, and `issue_sync.enabled: true`.
 
-A worker recognises a card the plugin made by the `specivo-issue: ACME-12 sig=...` line in its
-body. The signature is derived from `SPECIVO_API_KEY`, so someone who can create cards but does not
-have the key cannot forge one. The worker adopts the card only if all of these hold:
+How a worker recognises a card the plugin made:
 
-- the signature checks;
+- The card's body names its issue in exactly one `specivo-issue: ACME-12` line, which must be the
+  body's last line.
+- Right after creating the card, the plugin appends a comment `specivo-card: ACME-12 sig=...`.
+  Hermes cannot edit a card body, and comments are append-only.
+- The signature is an HMAC of the issue key and the card's own id, under a key derived from
+  `SPECIVO_API_KEY`. Without the key it cannot be forged, and a signature copied onto another card
+  does not verify there.
+
+The worker adopts the card only if all of these hold:
+
+- the signature checks for this card;
 - the issue is in the sync project;
 - the issue is in the current selection (open and assigned to the plugin's account);
 - no other card is already mapped to the issue.
 
-Any other card is ignored. Rotating the API key invalidates the signatures on existing cards,
-so only the profile that created those cards can still act on them.
+Any other card is ignored. If the comment cannot be posted, the plugin retries on the next tick.
+Rotating the API key invalidates the signatures on existing cards, so only the profile that
+created those cards can still act on them.
 
 ## Privacy and network use
 

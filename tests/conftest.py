@@ -108,8 +108,14 @@ class FakeBoard:
                 if key and task.get("idempotency_key") == key:
                     return json.dumps({"ok": True, "task_id": tid})
             tid = f"t_{len(self.tasks) + 1}"
-            self.tasks[tid] = {"status": "ready", **args}
+            self.tasks[tid] = {"status": "ready", "comments": [], **args}
             return json.dumps({"ok": True, "task_id": tid})
+        if tool == "kanban_comment":  # append-only, like Hermes
+            target = self.tasks.get(args["task_id"])
+            if target is None:
+                return json.dumps({"error": f"unknown task {args['task_id']}"})
+            target.setdefault("comments", []).append({"author": "worker", "body": args["body"]})
+            return json.dumps({"ok": True, "task_id": args["task_id"], "comment_id": len(target["comments"])})
         if tool == "kanban_complete":
             self.tasks[args["task_id"]]["status"] = "done"
             if self.on_complete:
@@ -119,7 +125,12 @@ class FakeBoard:
             shown = self.tasks.get(args["task_id"])
             if shown is None:
                 return json.dumps({"error": "no such task"})
-            return json.dumps({"task": {"id": args["task_id"], "title": shown["title"], "body": shown.get("body")}})
+            return json.dumps(
+                {
+                    "task": {"id": args["task_id"], "title": shown["title"], "body": shown.get("body")},
+                    "comments": list(shown.get("comments") or []),
+                }
+            )
         return json.dumps({"error": f"unexpected tool {tool}"})
 
     def created(self) -> list[dict[str, Any]]:

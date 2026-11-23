@@ -5,7 +5,14 @@ from typing import Any
 import pytest
 from conftest import BASE_URL, Clock, FakeCtx, issue_list
 
-from hermes_specivo.kanban_sync import MARKER, MAX_NEW_CARDS_PER_POLL, SIGNATURE, KanbanSync, card_signature
+from hermes_specivo.kanban_sync import (
+    CARD_PROOF,
+    MARKER,
+    MAX_NEW_CARDS_PER_POLL,
+    SIGNATURE,
+    KanbanSync,
+    card_signature,
+)
 from hermes_specivo.runtime import REDACTION_UNAVAILABLE, Runtime
 
 SYNC_ON: dict[str, Any] = {"enabled": True, "poll_seconds": 60}
@@ -66,9 +73,16 @@ def test_new_open_issues_become_cards(clock: Clock) -> None:
     assert first["assignee"] == "worker"  # the plugin's own profile by default
     assert first["idempotency_key"] == "specivo:ACME-1"
     assert f"{BASE_URL}/issue/ACME-1/" in first["body"]
-    assert f"{MARKER} ACME-1 sig={card_signature(API_KEY, 'ACME-1')}" in first["body"]
+    assert first["body"].endswith(f"\n{MARKER} ACME-1")  # one reference, the body's last line
+    # The signature covers the issue and the card's own id, so it is posted once the id exists.
+    proofs = [args for tool, args in ctx.board.calls if tool == "kanban_comment"]
+    assert proofs[0] == {
+        "task_id": "t_1",
+        "body": f"{CARD_PROOF} ACME-1 sig={card_signature(API_KEY, 'ACME-1', 't_1')}",
+    }
+    assert sync.snapshot()["cards"]["ACME-1"]["signed"] is True
     assert "Fix the login form" not in first["body"]  # a reference, not the issue text
-    assert sync.snapshot()["cards"]["ACME-1"] == {"task_id": "t_1", "state": "open", "board": None}
+    assert sync.snapshot()["cards"]["ACME-1"] == {"task_id": "t_1", "state": "open", "board": None, "signed": True}
 
 
 def test_the_poll_is_throttled(clock: Clock) -> None:
@@ -244,19 +258,37 @@ def test_cards_the_plugin_did_not_make_are_left_alone(clock: Clock) -> None:
     assert ctx.mcp.tool_calls("specivo_update_issue") == []
 
 
+def forge(ctx: FakeCtx, tid: str, body: str, proofs: list[str]) -> None:
+    """A card someone else put on the board, with any body and comments they like."""
+    comments = [{"author": "someone", "body": text} for text in proofs]
+    ctx.board.tasks[tid] = {"title": "Specivo issue ACME-1", "body": body, "comments": comments}
+
+
+def proof(issue: str, tid: str, key: str = API_KEY) -> str:
+    return f"{CARD_PROOF} {issue} sig={card_signature(key, issue, tid)}"
+
+
+REF = f"Work on Specivo issue ACME-1.\n\n{MARKER} ACME-1"
+
+
 @pytest.mark.parametrize(
-    "body",
+    ("body", "proofs"),
     [
-        f"{MARKER} ACME-1",  # the old unsigned marker anyone can type
-        f"{MARKER} ACME-1 sig=00000000000000000000000000000000",
-        f"{MARKER} ACME-1 sig={card_signature('a-different-key', 'ACME-1')}",
-        f"{MARKER} ACME-2 sig={card_signature(API_KEY, 'ACME-1')}",  # a signature copied from another issue
+        (REF, []),  # a reference and no proof
+        (REF, [f"{CARD_PROOF} ACME-1 sig={'0' * 32}"]),
+        (REF, [proof("ACME-1", "t_9", key="a-different-key")]),
+        (REF, [proof("ACME-1", "t_1")]),  # a real card's proof copied onto another card
+        (REF, [proof("ACME-2", "t_9")]),  # a proof for another issue
+        (f"{MARKER} ACME-1\n{MARKER} ACME-1", [proof("ACME-1", "t_9")]),  # two markers
+        (f"{MARKER} ACME-1\nanything after it", [proof("ACME-1", "t_9")]),  # not the last line
+        (f"see {MARKER} ACME-1", [proof("ACME-1", "t_9")]),  # not a line of its own
+        (REF, [f"note: {proof('ACME-1', 't_9')}"]),  # a proof inside other comment text
     ],
 )
-def test_a_forged_marker_is_not_adopted(clock: Clock, body: str) -> None:
+def test_a_forged_card_is_not_adopted(clock: Clock, body: str, proofs: list[str]) -> None:
     ctx, sync = make(clock)
     serve(ctx, [("ACME-1", "In Progress", "One"), ("ACME-2", "In Progress", "Two")])
-    ctx.board.tasks["t_9"] = {"title": "Specivo issue ACME-1", "body": body, "idempotency_key": "specivo:ACME-1"}
+    forge(ctx, "t_9", body, proofs)
     sync.on_task_claimed(task_id="t_9")
     sync.on_task_completed(task_id="t_9", summary="Done")
     sync.on_task_blocked(task_id="t_9", reason="Stop")
@@ -264,10 +296,28 @@ def test_a_forged_marker_is_not_adopted(clock: Clock, body: str) -> None:
     assert sync.snapshot()["cards"] == {}
 
 
+def test_a_copied_card_is_not_adopted_by_another_profile(clock: Clock) -> None:
+    dispatcher, dispatcher_sync = make(clock)
+    serve(dispatcher, [("ACME-1", "New", "One")])
+    tick(dispatcher_sync, clock)
+    real = dispatcher.board.tasks["t_1"]
+    # Someone who can read the real card copies its body and its proof comment onto a card of theirs.
+    forge(dispatcher, "t_9", real["body"], [c["body"] for c in real["comments"]])
+    worker, worker_sync = make(clock)  # another profile: no mapping for ACME-1 yet
+    worker.board = dispatcher.board
+    serve(worker, [("ACME-1", "In Progress", "One")])
+    worker_sync.on_task_completed(task_id="t_9", summary="Injected")
+    assert worker.mcp.tool_calls("specivo_update_issue") == []
+    worker_sync.on_task_completed(task_id="t_1", summary="Shipped")
+    assert worker.mcp.tool_calls("specivo_update_issue") == [
+        {"issue_ref": "ACME-1", "status_id": 3, "notes": "Shipped" + SIGNATURE}
+    ]
+
+
 def test_a_signed_card_outside_the_sync_project_is_not_adopted(clock: Clock) -> None:
     ctx, sync = make(clock)
     serve(ctx, [("OTHER-1", "In Progress", "Elsewhere")])
-    ctx.board.tasks["t_9"] = {"title": "x", "body": f"{MARKER} OTHER-1 sig={card_signature(API_KEY, 'OTHER-1')}"}
+    forge(ctx, "t_9", f"{MARKER} OTHER-1", [proof("OTHER-1", "t_9")])
     sync.on_task_completed(task_id="t_9", summary="Done")
     assert ctx.mcp.tool_calls("specivo_update_issue") == []
 
@@ -275,7 +325,7 @@ def test_a_signed_card_outside_the_sync_project_is_not_adopted(clock: Clock) -> 
 def test_a_signed_card_for_an_issue_outside_the_selection_is_not_adopted(clock: Clock) -> None:
     ctx, sync = make(clock)
     serve(ctx, [("ACME-2", "In Progress", "Mine")])  # ACME-1 is not assigned to the plugin's account
-    ctx.board.tasks["t_9"] = {"title": "x", "body": f"{MARKER} ACME-1 sig={card_signature(API_KEY, 'ACME-1')}"}
+    forge(ctx, "t_9", REF, [proof("ACME-1", "t_9")])
     sync.on_task_completed(task_id="t_9", summary="Done")
     assert ctx.mcp.tool_calls("specivo_update_issue") == []
 
@@ -284,8 +334,7 @@ def test_a_second_card_for_a_mapped_issue_is_not_adopted(clock: Clock) -> None:
     ctx, sync = make(clock)
     serve(ctx, [("ACME-1", "New", "One")])
     tick(sync, clock)
-    copy = dict(ctx.board.tasks["t_1"])
-    ctx.board.tasks["t_9"] = copy  # a copy of the real card, signature included
+    forge(ctx, "t_9", REF, [proof("ACME-1", "t_9")])  # even correctly signed for its own id
     sync.on_task_completed(task_id="t_9", summary="Done")
     assert ctx.mcp.tool_calls("specivo_update_issue") == []
     assert sync.snapshot()["tasks"] == {"t_1": "ACME-1"}
@@ -297,9 +346,23 @@ def test_without_the_api_key_no_card_is_signed_or_adopted(clock: Clock, monkeypa
     monkeypatch.delenv("SPECIVO_API_KEY")
     tick(sync, clock)
     assert ctx.board.created() == []
-    ctx.board.tasks["t_9"] = {"title": "x", "body": f"{MARKER} ACME-1 sig={card_signature(API_KEY, 'ACME-1')}"}
+    forge(ctx, "t_9", REF, [proof("ACME-1", "t_9")])
     sync.on_task_completed(task_id="t_9", summary="Done")
     assert ctx.mcp.tool_calls("specivo_update_issue") == []
+
+
+def test_a_proof_that_could_not_be_posted_is_posted_on_the_next_tick(clock: Clock) -> None:
+    ctx, sync = make(clock)
+    serve(ctx, [("ACME-1", "New", "One")])
+    ctx.board.fail.add("kanban_comment")
+    tick(sync, clock)
+    assert sync.snapshot()["cards"]["ACME-1"]["signed"] is False
+    ctx.board.fail.clear()
+    tick(sync, clock)
+    assert sync.snapshot()["cards"]["ACME-1"]["signed"] is True
+    assert [c["body"] for c in ctx.board.tasks["t_1"]["comments"]] == [proof("ACME-1", "t_1")]
+    tick(sync, clock)
+    assert len(ctx.board.tasks["t_1"]["comments"]) == 1  # posted once
 
 
 @pytest.mark.parametrize("failure", ["missing", "raises", "not-a-string"])
