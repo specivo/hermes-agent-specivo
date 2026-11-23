@@ -93,7 +93,9 @@ class FakeBoard:
     """The ``kanban_*`` tools through ``ctx.dispatch_tool``."""
 
     def __init__(self) -> None:
-        self.tasks: dict[str, dict[str, Any]] = {}
+        #: One task table per board, as in Hermes (each board has its own kanban.db): ids repeat across boards.
+        self.boards: dict[str, dict[str, dict[str, Any]]] = {"default": {}}
+        self.tasks = self.boards["default"]
         self.calls: list[tuple[str, dict[str, Any]]] = []
         self.on_complete: Callable[[str, str | None], None] | None = None
         self.fail: set[str] = set()
@@ -102,32 +104,38 @@ class FakeBoard:
         self.calls.append((tool, dict(args)))
         if tool in self.fail:
             return json.dumps({"error": f"{tool} is unavailable"})
+        tasks = self.boards.setdefault(args.get("board") or "default", {})
         if tool == "kanban_create":
             key = args.get("idempotency_key")
-            for tid, task in self.tasks.items():
+            for tid, task in tasks.items():
                 if key and task.get("idempotency_key") == key:
                     return json.dumps({"ok": True, "task_id": tid})
-            tid = f"t_{len(self.tasks) + 1}"
-            self.tasks[tid] = {"status": "ready", "comments": [], **args}
+            tid = f"t_{len(tasks) + 1}"
+            tasks[tid] = {"status": "ready", "comments": [], **args}
             return json.dumps({"ok": True, "task_id": tid})
         if tool == "kanban_comment":  # append-only, like Hermes
-            target = self.tasks.get(args["task_id"])
+            target = tasks.get(args["task_id"])
             if target is None:
                 return json.dumps({"error": f"unknown task {args['task_id']}"})
             target.setdefault("comments", []).append({"author": "worker", "body": args["body"]})
             return json.dumps({"ok": True, "task_id": args["task_id"], "comment_id": len(target["comments"])})
         if tool == "kanban_complete":
-            self.tasks[args["task_id"]]["status"] = "done"
+            tasks[args["task_id"]]["status"] = "done"
             if self.on_complete:
                 self.on_complete(args["task_id"], args.get("summary"))
             return json.dumps({"ok": True, "task_id": args["task_id"]})
         if tool == "kanban_show":
-            shown = self.tasks.get(args["task_id"])
+            shown = tasks.get(args["task_id"])
             if shown is None:
                 return json.dumps({"error": "no such task"})
             return json.dumps(
                 {
-                    "task": {"id": args["task_id"], "title": shown["title"], "body": shown.get("body")},
+                    "task": {
+                        "id": args["task_id"],
+                        "title": shown["title"],
+                        "body": shown.get("body"),
+                        "assignee": shown.get("assignee"),
+                    },
                     "comments": list(shown.get("comments") or []),
                 }
             )

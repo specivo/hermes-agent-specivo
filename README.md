@@ -193,13 +193,18 @@ How a worker recognises a card the plugin made:
   body's last line.
 - Right after creating the card, the plugin appends a comment `specivo-card: ACME-12 sig=...`.
   Hermes cannot edit a card body, and comments are append-only.
-- The signature is an HMAC of the issue key and the card's own id, under a key derived from
-  `SPECIVO_API_KEY`. Without the key it cannot be forged, and a signature copied onto another card
-  does not verify there.
+- The signature is an HMAC of the issue key, the board and the card's own id, under a key derived
+  from `SPECIVO_API_KEY`. Without the key it cannot be forged. A signature copied onto another
+  card does not verify there, even on another board where the same task id can exist.
+- The card is created with an idempotency key that is also derived from `SPECIVO_API_KEY`, so
+  nobody can create a card in advance that `kanban_create` would hand back to the plugin. The
+  plugin still reads back the card it gets. If the title, body or assignee differ from what it
+  sent, or if the card has comments the plugin did not write, it refuses the card and logs a
+  warning.
 
 The worker adopts the card only if all of these hold:
 
-- the signature checks for this card;
+- the signature checks for this card on this board;
 - the issue is in the sync project;
 - the issue is in the current selection (open and assigned to the plugin's account);
 - no other card is already mapped to the issue.

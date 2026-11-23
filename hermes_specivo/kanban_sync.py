@@ -23,12 +23,20 @@ Card ownership. Anyone who can create a card can write any body and comment on a
 who can read a card can copy it. A card's body therefore only names its issue: exactly one
 ``specivo-issue: KEY`` marker, which must be the body's last line. The proof is a separate comment
 the plugin appends right after ``kanban_create``, once the card's id exists:
-``specivo-card: KEY sig=<hmac>``, an HMAC of ``KEY|task_id`` under a key derived from
+``specivo-card: KEY sig=<hmac>``, an HMAC of ``KEY|board|task_id`` under a key derived from
 ``SPECIVO_API_KEY``. Hermes offers no way to edit a card body, and comments are append-only, so the
-proof cannot be put in the body. Because it covers the task id, a proof copied onto another card does
-not verify there. A card made by another process or profile is adopted only when all of these hold:
+proof cannot be put in the body. Task ids are unique only within one board (each board has its own
+database), so the board is part of the proof and of every mapping. A proof copied onto another card,
+on this board or another, does not verify there.
 
-- its proof verifies for its own id;
+``kanban_create``'s idempotency key is ``specivo:KEY:<hmac tag>``, also derived from the API key, so
+nobody can pre-create the card ``kanban_create`` would hand back. The card it answers is read back
+anyway: its title, body and assignee must be exactly what was sent, and its only comments may be the
+plugin's own proof for it. Otherwise it is refused and neither mapped nor signed.
+
+A card made by another process or profile is adopted only when all of these hold:
+
+- its proof verifies for its own board and id;
 - its issue is in the sync project and in the current selection;
 - no other card is already mapped to that issue.
 
@@ -68,22 +76,44 @@ FINAL = frozenset({"completed", "closed"})
 _ISSUE_KEY = r"[A-Z][A-Z0-9_]*-\d+"
 _MARKER_LINE_RE = re.compile(re.escape(MARKER) + r" (" + _ISSUE_KEY + r")")
 _PROOF_RE = re.compile(re.escape(CARD_PROOF) + r" (" + _ISSUE_KEY + r") sig=([0-9a-f]{32})")
-_SIGNATURE_CONTEXT = b"hermes-agent-specivo/card/v2"
+_CARD_KEY_CONTEXT = b"hermes-agent-specivo/card/v3"
+#: The board Hermes uses when none is named (``kanban_db.get_current_board``).
+DEFAULT_BOARD = "default"
 
 
-def card_signature(api_key: str, issue_key: str, task_id: str) -> str:
-    """The proof for card *task_id* of *issue_key*: an HMAC only holders of the API key can compute.
+def board_name(board: str | None) -> str:
+    """The board slug a card lives on; ``None`` means Hermes's default board."""
+    return board or DEFAULT_BOARD
 
-    It covers the card's id, so it is valid on that one card only. The key is first narrowed to a
-    purpose-bound value, so the card never carries anything usable as the API key.
+
+def task_ref(board: str | None, task_id: str) -> str:
+    """A card's identity: task ids are unique only within one board's database, so the board is part of it."""
+    return f"{board_name(board)}/{task_id}"
+
+
+def _card_key(api_key: str) -> bytes:
+    """A purpose-bound key derived from the API key; nothing on a card is usable as the API key."""
+    return hmac.new(api_key.encode("utf-8"), _CARD_KEY_CONTEXT, hashlib.sha256).digest()
+
+
+def card_signature(api_key: str, issue_key: str, board: str | None, task_id: str) -> str:
+    """The proof for card *task_id* on *board* of *issue_key*: an HMAC only holders of the API key can compute.
+
+    It covers the board and the card's id, so it is valid on that one card only.
     """
-    card_key = hmac.new(api_key.encode("utf-8"), _SIGNATURE_CONTEXT, hashlib.sha256).digest()
-    message = f"{issue_key}|{task_id}".encode()
-    return hmac.new(card_key, message, hashlib.sha256).hexdigest()[:32]
+    message = f"proof|{issue_key}|{board_name(board)}|{task_id}".encode()
+    return hmac.new(_card_key(api_key), message, hashlib.sha256).hexdigest()[:32]
 
 
-def proof_comment(api_key: str, issue_key: str, task_id: str) -> str:
-    return f"{CARD_PROOF} {issue_key} sig={card_signature(api_key, issue_key, task_id)}"
+def card_idempotency_key(api_key: str, issue_key: str) -> str:
+    """The ``kanban_create`` idempotency key: unguessable without the API key, so nobody can pre-create
+    a card that ``kanban_create`` would hand back to the plugin as its own."""
+    tag = hmac.new(_card_key(api_key), f"idempotency|{issue_key}".encode(), hashlib.sha256).hexdigest()[:16]
+    return f"specivo:{issue_key}:{tag}"
+
+
+def proof_comment(api_key: str, issue_key: str, board: str | None, task_id: str) -> str:
+    return f"{CARD_PROOF} {issue_key} sig={card_signature(api_key, issue_key, board, task_id)}"
 
 
 def body_issue(body: str) -> str | None:
@@ -95,17 +125,26 @@ def body_issue(body: str) -> str | None:
     return match.group(1) if match else None
 
 
-def has_valid_proof(comments: Any, api_key: str, issue_key: str, task_id: str) -> bool:
+def _is_proof(comment: Any, expected: str, issue_key: str) -> bool:
+    text = comment.get("body") if isinstance(comment, dict) else None
+    match = _PROOF_RE.fullmatch(text.strip()) if isinstance(text, str) else None
+    return bool(match and match.group(1) == issue_key and hmac.compare_digest(match.group(2), expected))
+
+
+def has_valid_proof(comments: Any, api_key: str, issue_key: str, board: str | None, task_id: str) -> bool:
     """Whether a comment consisting of nothing but a proof verifies for this issue and this card."""
     if not isinstance(comments, list):
         return False
-    expected = card_signature(api_key, issue_key, task_id)
-    for comment in comments:
-        text = comment.get("body") if isinstance(comment, dict) else None
-        match = _PROOF_RE.fullmatch(text.strip()) if isinstance(text, str) else None
-        if match and match.group(1) == issue_key and hmac.compare_digest(match.group(2), expected):
-            return True
-    return False
+    expected = card_signature(api_key, issue_key, board, task_id)
+    return any(_is_proof(comment, expected, issue_key) for comment in comments)
+
+
+def only_proofs(comments: Any, api_key: str, issue_key: str, board: str | None, task_id: str) -> bool:
+    """Whether every comment is the plugin's own proof for this card (an empty list qualifies)."""
+    if not isinstance(comments, list):
+        return False
+    expected = card_signature(api_key, issue_key, board, task_id)
+    return all(_is_proof(comment, expected, issue_key) for comment in comments)
 
 
 class KanbanError(RuntimeError):
@@ -173,14 +212,15 @@ class KanbanSync:
             card.update(fields)
             data["cards"][key] = card
             if card.get("task_id"):
-                data["tasks"][card["task_id"]] = key
+                data["tasks"][task_ref(card.get("board"), card["task_id"])] = key
 
         self._update(change)
 
     def _drop_card(self, key: str) -> None:
         def change(data: dict[str, Any]) -> None:
             card = data["cards"].pop(key, None) or {}
-            data["tasks"].pop(card.get("task_id"), None)
+            if card.get("task_id"):
+                data["tasks"].pop(task_ref(card.get("board"), card["task_id"]), None)
 
         self._update(change)
 
@@ -270,7 +310,7 @@ class KanbanSync:
             "title": _clip(card_title(key), TITLE_MAX),
             "body": card_body(key, settings.issue_link(key)),
             "assignee": settings.issue_sync.card_assignee or self.rt.profile_name,
-            "idempotency_key": f"specivo:{key}",
+            "idempotency_key": card_idempotency_key(api_key, key),
         }
         if board:
             args["board"] = board
@@ -283,15 +323,60 @@ class KanbanSync:
         if not isinstance(task_id, str) or not task_id:
             logger.warning("specivo: kanban_create for %s answered no task_id: %s", key, answer)
             return False
-        self._set_card(key, task_id=task_id, state="open", board=board, signed=False)
-        self._sign(key, task_id, api_key)
+        signed = self._check_created(key, task_id, board, args, api_key)
+        if signed is None:
+            return False
+        self._set_card(key, task_id=task_id, state="open", board=board, signed=signed)
+        if not signed:
+            self._sign(key, task_id, board, api_key)
         logger.info("specivo: card %s created for %s", task_id, key)
         return True
 
-    def _sign(self, key: str, task_id: str, api_key: str) -> None:
-        """Append the proof comment; a failure leaves the card unsigned until the next tick."""
+    def _check_created(
+        self, key: str, task_id: str, board: str | None, sent: dict[str, Any], api_key: str
+    ) -> bool | None:
+        """Whether the card ``kanban_create`` answered is the one the plugin asked for.
+
+        ``kanban_create`` hands back an existing card with the same idempotency key instead of making
+        one, so the card is read back. Its title, body and assignee must be exactly what was sent, and
+        any comments must be the plugin's own proof for this card (left by an earlier run whose state
+        was lost). Answers ``True`` when the card is already signed, ``False`` when it is new, and
+        ``None`` (after a warning) when the card is refused and must not be mapped or signed.
+        """
+        ref = task_ref(board, task_id)
+        args: dict[str, Any] = {"task_id": task_id}
+        if board:
+            args["board"] = board
         try:
-            self._dispatch("kanban_comment", {"task_id": task_id, "body": proof_comment(api_key, key, task_id)})
+            shown = self._dispatch("kanban_show", args)
+        except KanbanError as exc:
+            self.rt.warn_once(
+                f"refused:{ref}", "specivo: could not read back card %s for %s, refused: %s", ref, key, exc
+            )
+            return None
+        task = shown.get("task")
+        comments = shown.get("comments")
+        problem = None
+        if not isinstance(task, dict):
+            problem = "it has no task"
+        elif any(task.get(field) != sent[field] for field in ("title", "body", "assignee")):
+            problem = "its title, body or assignee differ from what the plugin sent"
+        elif not only_proofs(comments, api_key, key, board, task_id):
+            problem = "it already has comments the plugin did not write"
+        if problem is not None:
+            self.rt.warn_once(
+                f"refused:{ref}", "specivo: kanban_create answered card %s for %s, but %s; refused", ref, key, problem
+            )
+            return None
+        return bool(comments)
+
+    def _sign(self, key: str, task_id: str, board: str | None, api_key: str) -> None:
+        """Append the proof comment; a failure leaves the card unsigned until the next tick."""
+        args: dict[str, Any] = {"task_id": task_id, "body": proof_comment(api_key, key, board, task_id)}
+        if board:
+            args["board"] = board
+        try:
+            self._dispatch("kanban_comment", args)
         except KanbanError as exc:
             logger.warning("specivo: could not sign card %s for %s, will retry: %s", task_id, key, exc)
             return
@@ -303,7 +388,7 @@ class KanbanSync:
             return
         for key, card in self.snapshot()["cards"].items():
             if card.get("signed") is False and card.get("state") in LIVE and card.get("task_id"):
-                self._sign(key, str(card["task_id"]), api_key)
+                self._sign(key, str(card["task_id"]), card.get("board"), api_key)
 
     def _close_card(self, key: str, card: dict[str, Any], summary: str) -> None:
         # Mark first: kanban_complete fires kanban_task_completed in this process, and that hook
@@ -312,24 +397,30 @@ class KanbanSync:
         task_id = card.get("task_id")
         if not task_id:
             return
+        args: dict[str, Any] = {"task_id": task_id, "summary": summary}
+        if card.get("board"):
+            args["board"] = card["board"]
         try:
-            self._dispatch("kanban_complete", {"task_id": task_id, "summary": summary})
+            self._dispatch("kanban_complete", args)
         except KanbanError as exc:
             logger.warning("specivo: could not complete card %s for %s: %s", task_id, key, exc)
 
     # -- Kanban -> Specivo (lifecycle hooks) -------------------------------------------------------
 
-    def _issue_for(self, task_id: str, settings: Settings) -> str | None:
+    def _issue_for(self, task_id: str, board: str | None, settings: Settings) -> str | None:
         snapshot = self.snapshot()
-        key = snapshot["tasks"].get(task_id)
+        key = snapshot["tasks"].get(task_ref(board, task_id))
         if isinstance(key, str):
             return key  # a card this profile created or adopted: the mapping is the plugin's own
-        return self._adopt(task_id, settings, snapshot)
+        return self._adopt(task_id, board, settings, snapshot)
 
-    def _adopt(self, task_id: str, settings: Settings, snapshot: dict[str, Any]) -> str | None:
+    def _adopt(self, task_id: str, board: str | None, settings: Settings, snapshot: dict[str, Any]) -> str | None:
         """The issue of a card made by another process or profile, or ``None`` to leave the card alone."""
+        args: dict[str, Any] = {"task_id": task_id}
+        if board:
+            args["board"] = board
         try:
-            shown = self._dispatch("kanban_show", {"task_id": task_id})
+            shown = self._dispatch("kanban_show", args)
         except KanbanError:
             return None
         task = shown.get("task")
@@ -339,7 +430,7 @@ class KanbanSync:
         if key is None:
             return None
         api_key = get_secret(API_KEY_ENV)
-        if api_key is None or not has_valid_proof(shown.get("comments"), api_key, key, task_id):
+        if api_key is None or not has_valid_proof(shown.get("comments"), api_key, key, board, task_id):
             logger.warning("specivo: card %s names %s without a valid proof for this card; ignored", task_id, key)
             return None
         project = settings.sync_project()
@@ -347,8 +438,12 @@ class KanbanSync:
             logger.warning("specivo: card %s names %s, outside the sync project; ignored", task_id, key)
             return None
         known = snapshot["cards"].get(key)
-        if known is not None and known.get("task_id") not in (None, task_id):
-            logger.warning("specivo: card %s names %s, which has card %s; ignored", task_id, key, known["task_id"])
+        if (
+            known is not None
+            and known.get("task_id")
+            and task_ref(known.get("board"), known["task_id"]) != task_ref(board, task_id)
+        ):
+            logger.warning("specivo: card %s names %s, which has another card; ignored", task_ref(board, task_id), key)
             return None
         sync = settings.issue_sync
         try:
@@ -359,16 +454,25 @@ class KanbanSync:
         if key not in {row.key for row in rows}:
             logger.warning("specivo: card %s names %s, which is not in the sync selection; ignored", task_id, key)
             return None
-        self._set_card(key, task_id=task_id, state=(known or {}).get("state", "open"))
+        self._set_card(key, task_id=task_id, board=board, state=(known or {}).get("state", "open"))
         return key
 
     def _transition(
-        self, task_id: str, new_state: str, skip_from: frozenset[str], status: str, note: str | None
+        self,
+        task_id: str,
+        board: str | None,
+        new_state: str,
+        skip_from: frozenset[str],
+        status: str,
+        note: str | None,
     ) -> None:
         settings = self.rt.configured()
         if settings is None or not settings.issue_sync.enabled or not task_id:
             return
-        key = self._issue_for(task_id, settings)
+        wanted = settings.issue_sync.board
+        if wanted is not None and board_name(board) != wanted:
+            return
+        key = self._issue_for(task_id, board, settings)
         if key is None:
             return
         card = self.snapshot()["cards"].get(key) or {}
@@ -406,13 +510,15 @@ class KanbanSync:
     def _comment(self, text: str) -> str:
         return _clip(self.rt.redact(text.strip()), COMMENT_MAX) + SIGNATURE
 
-    def on_task_claimed(self, task_id: str = "", **_: Any) -> None:
-        self._transition(task_id, "claimed", frozenset({"claimed"}) | FINAL, "in_progress", None)
+    def on_task_claimed(self, task_id: str = "", board: str | None = None, **_: Any) -> None:
+        self._transition(task_id, board, "claimed", frozenset({"claimed"}) | FINAL, "in_progress", None)
 
-    def on_task_completed(self, task_id: str = "", summary: str | None = None, **_: Any) -> None:
+    def on_task_completed(
+        self, task_id: str = "", board: str | None = None, summary: str | None = None, **_: Any
+    ) -> None:
         text = summary or "The Hermes Kanban card was completed."
-        self._transition(task_id, "completed", FINAL, "resolved", text)
+        self._transition(task_id, board, "completed", FINAL, "resolved", text)
 
-    def on_task_blocked(self, task_id: str = "", reason: str | None = None, **_: Any) -> None:
+    def on_task_blocked(self, task_id: str = "", board: str | None = None, reason: str | None = None, **_: Any) -> None:
         text = f"Blocked in Hermes: {reason}" if reason else "The Hermes Kanban card is blocked."
-        self._transition(task_id, "blocked", frozenset({"blocked"}) | FINAL, "feedback", text)
+        self._transition(task_id, board, "blocked", frozenset({"blocked"}) | FINAL, "feedback", text)
