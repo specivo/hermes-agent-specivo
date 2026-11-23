@@ -29,6 +29,8 @@ DEFAULT_STATUSES: dict[str, str] = {
 }
 
 _PROJECT_KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]{0,31}$")
+#: A Hermes Kanban board slug, as ``kanban_db._normalize_board_slug`` accepts it (after lower-casing).
+BOARD_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9\-_]{0,63}$")
 _SERVER_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 _LOOPBACK_NAMES = frozenset({"localhost", "localhost.localdomain"})
 
@@ -102,6 +104,26 @@ def _project_key(value: object, key: str) -> str | None:
     if not _PROJECT_KEY_RE.fullmatch(text):
         raise ConfigError(f"{key} must be a Specivo project key such as ACME (upper case), got {text!r}")
     return text
+
+
+def normalize_board(value: object) -> str | None:
+    """A board slug normalised the way Hermes does (strip, lower case), or ``None`` when it is not one."""
+    if not isinstance(value, str):
+        return None
+    slug = value.strip().lower()
+    return slug if BOARD_SLUG_RE.fullmatch(slug) else None
+
+
+def _board(value: object, key: str) -> str | None:
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None
+    slug = normalize_board(value)
+    if slug is None:
+        raise ConfigError(
+            f"{key} must be a Hermes board slug (1-64 lower-case letters, digits, '-' or '_', "
+            f"not starting with '-' or '_'), got {value!r}"
+        )
+    return slug
 
 
 def _mapping(value: object, key: str) -> Mapping[str, Any]:
@@ -198,7 +220,7 @@ def _issue_sync(raw: Mapping[str, Any]) -> IssueSyncSettings:
     return IssueSyncSettings(
         enabled=_bool(raw.get("enabled"), f"{prefix}.enabled", False),
         project=_project_key(raw.get("project"), f"{prefix}.project"),
-        board=_optional_text(raw.get("board"), f"{prefix}.board"),
+        board=_board(raw.get("board"), f"{prefix}.board"),
         card_assignee=_optional_text(raw.get("card_assignee"), f"{prefix}.card_assignee"),
         assignee=assignee,
         tag=tag,

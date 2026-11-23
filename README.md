@@ -136,7 +136,7 @@ All settings live under `plugins.entries.specivo.settings` in `config.yaml`:
 | `issue_sync.project` | `default_project` | Project whose issues become cards |
 | `issue_sync.select.assignee` | `me` | Always `me`: only issues assigned to the API key's account become cards (any other value is refused) |
 | `issue_sync.select.tag` | (none) | Also require this tag |
-| `issue_sync.board` | (all) | Only this Kanban board; cards are created on it |
+| `issue_sync.board` | (the board Hermes names) | Only this Kanban board slug; cards are created on it. Recommended: without it, the plugin uses the board each dispatcher tick names |
 | `issue_sync.card_assignee` | the plugin's profile | Hermes profile the cards are assigned to |
 | `issue_sync.poll_seconds` | `60` | How often to look for new issues (15 or more) |
 | `issue_sync.statuses` | `In Progress`, `Resolved`, `Feedback` | `in_progress`, `resolved`, `feedback`: status names or ids for claim, completion and block |
@@ -176,8 +176,8 @@ most every `poll_seconds`:
 |---|---|
 | An open issue assigned to the plugin's account (and tagged, if `select.tag` is set) has no card | creates one with `kanban_create`: title `Specivo issue ACME-12`, a body that links to the issue, assigned to `card_assignee`. It creates at most 20 per poll |
 | `kanban_task_claimed` | moves the issue to `in_progress` |
-| `kanban_task_completed` | posts the summary as a comment and moves the issue to `resolved` |
-| `kanban_task_blocked` | posts the reason as a comment and moves the issue to `feedback` |
+| `kanban_task_completed` | posts the worker run's summary as a comment and moves the issue to `resolved` |
+| `kanban_task_blocked` | posts the worker run's reason as a comment and moves the issue to `feedback` |
 | The issue is resolved, closed or no longer matches | completes its card, without a comment |
 
 Each transition runs once per card. A Specivo call that fails is retried on the next tick.
@@ -187,31 +187,63 @@ Hermes fires `kanban_task_claimed` in the dispatcher and the other two hooks in 
 which runs as the card's assignee profile. That profile needs the plugin enabled with the same
 `url`, the same `SPECIVO_API_KEY`, and `issue_sync.enabled: true`.
 
-How a worker recognises a card the plugin made:
+### Boards
+
+Every Kanban call the plugin makes names its board. The board is `issue_sync.board` when it is set.
+Otherwise it is the board Hermes names in the dispatcher tick, which is Hermes's own idea of the
+current board. A tick that names no board, when none is configured, syncs nothing. A lifecycle hook
+without a board is used only when the board is unambiguous: either one is configured, or the ticks
+have named exactly one. Task ids are unique only within a board, so the plugin identifies cards as
+`board/task id`.
+
+### Which cards the plugin trusts
+
+The plugin assumes that someone without the API key may do any of these:
+
+- create cards;
+- comment on any card;
+- complete or block cards they can reach;
+- make lifecycle hooks fire with any payload.
+
+It protects itself in four ways.
+
+**Its own cards carry a proof.**
 
 - The card's body names its issue in exactly one `specivo-issue: ACME-12` line, which must be the
   body's last line.
 - Right after creating the card, the plugin appends a comment `specivo-card: ACME-12 sig=...`.
   Hermes cannot edit a card body, and comments are append-only.
 - The signature is an HMAC of the issue key, the board and the card's own id, under a key derived
-  from `SPECIVO_API_KEY`. Without the key it cannot be forged. A signature copied onto another
-  card does not verify there, even on another board where the same task id can exist.
-- The card is created with an idempotency key that is also derived from `SPECIVO_API_KEY`, so
-  nobody can create a card in advance that `kanban_create` would hand back to the plugin. The
-  plugin still reads back the card it gets. If the title, body or assignee differ from what it
-  sent, or if the card has comments the plugin did not write, it refuses the card and logs a
-  warning.
+  from `SPECIVO_API_KEY`. Without the key it cannot be forged, and a signature copied onto another
+  card does not verify there, on any board.
 
-The worker adopts the card only if all of these hold:
+**It checks the card it creates.**
+
+- `kanban_create` uses an idempotency key derived from `SPECIVO_API_KEY`, so nobody can create a
+  card in advance that Hermes would hand back to the plugin.
+- The plugin reads the returned card back on the same board. If the board, title, body or assignee
+  differ from what it sent, or the card has comments the plugin did not write, it refuses the card
+  and logs a warning.
+
+**It adopts another profile's card only if all of these hold:**
 
 - the signature checks for this card on this board;
 - the issue is in the sync project;
 - the issue is in the current selection (open and assigned to the plugin's account);
 - no other card is already mapped to the issue.
 
-Any other card is ignored. If the comment cannot be posted, the plugin retries on the next tick.
-Rotating the API key invalidates the signatures on existing cards, so only the profile that
-created those cards can still act on them.
+**It believes the card, not the hook.**
+
+- A hook counts only if the card, read back on its board, is in the state the hook reports:
+  running after a claim, done after a completion, blocked after a block.
+- The comment text is the summary of the card's own run, never the text in the hook payload.
+- A card completed or blocked without a worker run, for example an unclaimed card someone finished
+  by hand, still moves the issue. The comment then says the card was finished outside a worker run
+  and does not copy its text.
+
+Any other card or hook is ignored and a warning is logged. If the proof comment cannot be posted,
+the plugin retries on the next tick. Rotating the API key invalidates the signatures on existing
+cards, so only the profile that created those cards can still act on them.
 
 ## Privacy and network use
 
@@ -247,6 +279,12 @@ those writes are refused.
   last one to link wins.
 - A card completed in Hermes is not created again while it stays on the board. If its issue is
   reopened in Specivo, the card has to be moved back on the board by hand.
+- Hermes lets anyone with Kanban rights complete or block a card once its worker has exited. The
+  run they finish is a real run, so its text is posted after redaction, like a worker's. The plugin
+  cannot tell the two apart.
+- Someone who comments on a new card in the moment between its creation and the plugin reading it
+  back makes the plugin refuse its own card. That blocks the sync for that issue; it gives the
+  commenter no control over it.
 
 ## Development
 

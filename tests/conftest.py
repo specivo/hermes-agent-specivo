@@ -90,28 +90,73 @@ class StubMcp:
 
 
 class FakeBoard:
-    """The ``kanban_*`` tools through ``ctx.dispatch_tool``."""
+    """The ``kanban_*`` tools through ``ctx.dispatch_tool``, with Hermes's statuses and runs.
+
+    One task table per board, as in Hermes (each board has its own kanban.db), so task ids repeat
+    across boards. A call without ``board`` goes to ``current``, Hermes's active board, which need
+    not be ``default``.
+    """
 
     def __init__(self) -> None:
-        #: One task table per board, as in Hermes (each board has its own kanban.db): ids repeat across boards.
         self.boards: dict[str, dict[str, dict[str, Any]]] = {"default": {}}
         self.tasks = self.boards["default"]
+        self.current = "default"
         self.calls: list[tuple[str, dict[str, Any]]] = []
         self.on_complete: Callable[[str, str | None], None] | None = None
         self.fail: set[str] = set()
+        self.extra_show: dict[str, Any] = {}
+
+    def table(self, board: str | None) -> dict[str, dict[str, Any]]:
+        return self.boards.setdefault(board or self.current, {})
+
+    def transition(
+        self, event: str, task_id: str, text: str | None = None, board: str = "default", synthesized: bool = False
+    ) -> None:
+        """What Hermes does to the card before it fires the lifecycle hook."""
+        task = self.table(board)[task_id]
+        runs = task.setdefault("runs", [])
+        if event == "claimed":
+            task["status"] = "running"
+            runs.append(
+                {
+                    "id": len(runs) + 1,
+                    "status": "running",
+                    "outcome": None,
+                    "summary": None,
+                    "started_at": 100,
+                    "ended_at": None,
+                }
+            )
+            return
+        outcome, status = ("completed", "done") if event == "completed" else ("blocked", "blocked")
+        task["status"] = status
+        open_run = next((r for r in runs if r["ended_at"] is None), None)
+        if open_run is not None and not synthesized:
+            open_run.update(status=status, outcome=outcome, summary=text, ended_at=200)
+        else:  # a never-claimed card: Hermes records a zero-duration run
+            runs.append(
+                {
+                    "id": len(runs) + 1,
+                    "status": status,
+                    "outcome": outcome,
+                    "summary": text,
+                    "started_at": 300,
+                    "ended_at": 300,
+                }
+            )
 
     def __call__(self, tool: str, args: dict[str, Any], **_: Any) -> str:
         self.calls.append((tool, dict(args)))
         if tool in self.fail:
             return json.dumps({"error": f"{tool} is unavailable"})
-        tasks = self.boards.setdefault(args.get("board") or "default", {})
+        tasks = self.table(args.get("board"))
         if tool == "kanban_create":
             key = args.get("idempotency_key")
             for tid, task in tasks.items():
                 if key and task.get("idempotency_key") == key:
                     return json.dumps({"ok": True, "task_id": tid})
             tid = f"t_{len(tasks) + 1}"
-            tasks[tid] = {"status": "ready", "comments": [], **args}
+            tasks[tid] = {"status": "ready", "comments": [], "runs": [], **args}
             return json.dumps({"ok": True, "task_id": tid})
         if tool == "kanban_comment":  # append-only, like Hermes
             target = tasks.get(args["task_id"])
@@ -120,7 +165,7 @@ class FakeBoard:
             target.setdefault("comments", []).append({"author": "worker", "body": args["body"]})
             return json.dumps({"ok": True, "task_id": args["task_id"], "comment_id": len(target["comments"])})
         if tool == "kanban_complete":
-            tasks[args["task_id"]]["status"] = "done"
+            self.transition("completed", args["task_id"], args.get("summary"), args.get("board") or self.current)
             if self.on_complete:
                 self.on_complete(args["task_id"], args.get("summary"))
             return json.dumps({"ok": True, "task_id": args["task_id"]})
@@ -128,15 +173,19 @@ class FakeBoard:
             shown = tasks.get(args["task_id"])
             if shown is None:
                 return json.dumps({"error": "no such task"})
+            task_view = {
+                "id": args["task_id"],
+                "title": shown["title"],
+                "body": shown.get("body"),
+                "assignee": shown.get("assignee"),
+                "status": shown.get("status", "ready"),
+            }
+            task_view.update(self.extra_show)
             return json.dumps(
                 {
-                    "task": {
-                        "id": args["task_id"],
-                        "title": shown["title"],
-                        "body": shown.get("body"),
-                        "assignee": shown.get("assignee"),
-                    },
+                    "task": task_view,
                     "comments": list(shown.get("comments") or []),
+                    "runs": list(shown.get("runs") or []),
                 }
             )
         return json.dumps({"error": f"unexpected tool {tool}"})
