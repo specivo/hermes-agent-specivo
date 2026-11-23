@@ -13,6 +13,9 @@ from .state import StateStore, StatusCache
 
 logger = logging.getLogger(__name__)
 
+#: What is sent in place of text that could not be redacted: never the text itself.
+REDACTION_UNAVAILABLE = "Summary withheld: secret redaction is unavailable in this Hermes."
+
 
 class Runtime:
     """Wraps the ``PluginContext``. Settings are read on every use, so edits apply without a restart."""
@@ -53,15 +56,24 @@ class Runtime:
         return StatusCache(self.state, self.clock)
 
     def redact(self, text: str) -> str:
-        """Scrub secrets from text that leaves the machine (``ctx.redact_text`` at full strength)."""
+        """Scrub secrets from text that leaves the machine (``ctx.redact_text`` at full strength).
+
+        Fails closed: when Hermes offers no redactor, or it raises or answers something that is
+        not text, :data:`REDACTION_UNAVAILABLE` is returned instead of *text*, and a warning is logged.
+        """
         redact = getattr(self.ctx, "redact_text", None)
-        if redact is None:
-            return text
+        if not callable(redact):
+            self.warn_once("redact:missing", "specivo: Hermes offers no secret redaction; text was withheld")
+            return REDACTION_UNAVAILABLE
         try:
-            return str(redact(text, force=True))
-        except Exception:  # redaction must never block the hook; fall back to the plain text
-            logger.debug("specivo: redact_text failed", exc_info=True)
-            return text
+            redacted = redact(text, force=True)
+        except Exception as exc:  # any failure withholds the text; it is never sent unredacted
+            logger.warning("specivo: secret redaction failed (%s); text was withheld", type(exc).__name__)
+            return REDACTION_UNAVAILABLE
+        if not isinstance(redacted, str):
+            logger.warning("specivo: secret redaction answered no text; text was withheld")
+            return REDACTION_UNAVAILABLE
+        return redacted
 
     def warn_once(self, token: str, message: str, *args: object) -> None:
         if token in self._reported:

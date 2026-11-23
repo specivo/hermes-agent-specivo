@@ -134,8 +134,8 @@ All settings live under `plugins.entries.specivo.settings` in `config.yaml`:
 | `events.enabled` | `true` | Whether `doctor` checks the webhook |
 | `issue_sync.enabled` | `false` | Turns on the Kanban sync |
 | `issue_sync.project` | `default_project` | Project whose issues become cards |
-| `issue_sync.select.assignee` | `me` | Only issues assigned to this login (`me` is the API key's account) |
-| `issue_sync.select.tag` | (none) | Only issues with this tag (combined with the assignee; set the assignee to `null` for tag only) |
+| `issue_sync.select.assignee` | `me` | Always `me`: only issues assigned to the API key's account become cards (any other value is refused) |
+| `issue_sync.select.tag` | (none) | Also require this tag |
 | `issue_sync.board` | (all) | Only this Kanban board; cards are created on it |
 | `issue_sync.card_assignee` | the plugin's profile | Hermes profile the cards are assigned to |
 | `issue_sync.poll_seconds` | `60` | How often to look for new issues (15 or more) |
@@ -174,7 +174,7 @@ most every `poll_seconds`:
 
 | When | The plugin |
 |---|---|
-| An open issue matches the selector and has no card | creates one with `kanban_create`: title `ACME-12: subject`, a body that points at the issue, assigned to `card_assignee`. It creates at most 20 per poll |
+| An open issue assigned to the plugin's account (and tagged, if `select.tag` is set) has no card | creates one with `kanban_create`: title `Specivo issue ACME-12`, a body that links to the issue, assigned to `card_assignee`. It creates at most 20 per poll |
 | `kanban_task_claimed` | moves the issue to `in_progress` |
 | `kanban_task_completed` | posts the summary as a comment and moves the issue to `resolved` |
 | `kanban_task_blocked` | posts the reason as a comment and moves the issue to `feedback` |
@@ -185,8 +185,19 @@ Comments end with "via Hermes"; the plugin never reads them back.
 
 Hermes fires `kanban_task_claimed` in the dispatcher and the other two hooks in the worker process,
 which runs as the card's assignee profile. That profile needs the plugin enabled with the same
-`url`, and `issue_sync.enabled: true`. A worker recognises a card the plugin made by the
-`specivo-issue: ACME-12` line in its body.
+`url`, the same `SPECIVO_API_KEY`, and `issue_sync.enabled: true`.
+
+A worker recognises a card the plugin made by the `specivo-issue: ACME-12 sig=...` line in its
+body. The signature is derived from `SPECIVO_API_KEY`, so someone who can create cards but does not
+have the key cannot forge one. The worker adopts the card only if all of these hold:
+
+- the signature checks;
+- the issue is in the sync project;
+- the issue is in the current selection (open and assigned to the plugin's account);
+- no other card is already mapped to the issue.
+
+Any other card is ignored. Rotating the API key invalidates the signatures on existing cards,
+so only the profile that created those cards can still act on them.
 
 ## Privacy and network use
 
@@ -196,19 +207,20 @@ What the plugin sends, and where:
   other network calls, except `doctor`'s `GET` on your receiver URL. It has no telemetry.
 - **Session link.** The plugin sends Hermes's session id, the parent session id, and the issue key
   when there is one.
-- **Kanban sync.** The plugin reads issue keys, subjects and statuses, and turns keys and subjects
-  into card titles. It posts card summaries and block reasons as issue comments, after Hermes's
-  secret redaction (`redact_text` at full strength).
+- **Kanban sync.** The plugin reads issue keys and statuses and puts only the key on a card. It
+  posts card summaries and block reasons as issue comments, after Hermes's secret redaction
+  (`redact_text` at full strength). If redaction is unavailable or fails, the text is not sent;
+  the comment says the summary was withheld.
 - **Webhook.** Hermes itself sends events to the receiver, signed with your webhook secret. The
   Specivo receiver documentation lists the fields it stores.
 - **Local data.** The plugin writes `config.yaml` only when you run `setup` (with a backup), and
   its own state (linked sessions, cards) in Hermes's plugin data folder. Secrets stay in Hermes's
   `.env` and are read through Hermes's profile secret scope.
 
-Issue subjects become card titles that a Kanban worker reads. Anyone who can create or rename
-issues that match the selector therefore supplies text your workers see. The card body tells the
-worker to treat issue text as information, not as instructions. Use a selector (an assignee or a
-tag) that only trusted people can set.
+Cards carry no issue text: the title is the key and the body is a link. Cards are made only for
+issues assigned to the plugin's account, and assigning an issue needs edit rights in the project.
+A worker that opens the issue still reads text that other people wrote, so the card tells it to
+treat that text as information, not as instructions.
 
 The plugin's own calls go through the MCP server like the agent's. If you mark that server
 `trust: untrusted`, Hermes asks before each write, and in unattended runs (cron, Kanban workers)

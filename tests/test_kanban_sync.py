@@ -5,10 +5,17 @@ from typing import Any
 import pytest
 from conftest import BASE_URL, Clock, FakeCtx, issue_list
 
-from hermes_specivo.kanban_sync import MARKER, MAX_NEW_CARDS_PER_POLL, SIGNATURE, KanbanSync
-from hermes_specivo.runtime import Runtime
+from hermes_specivo.kanban_sync import MARKER, MAX_NEW_CARDS_PER_POLL, SIGNATURE, KanbanSync, card_signature
+from hermes_specivo.runtime import REDACTION_UNAVAILABLE, Runtime
 
 SYNC_ON: dict[str, Any] = {"enabled": True, "poll_seconds": 60}
+API_KEY = "spv_test_key"
+
+
+@pytest.fixture(autouse=True)
+def _api_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The plugin signs its cards with a key derived from SPECIVO_API_KEY (a required secret)."""
+    monkeypatch.setenv("SPECIVO_API_KEY", API_KEY)
 
 
 def make(clock: Clock, issue_sync: dict[str, Any] | None = None, **settings: Any) -> tuple[FakeCtx, KanbanSync]:
@@ -52,12 +59,14 @@ def test_new_open_issues_become_cards(clock: Clock) -> None:
         }
     ]
     created = ctx.board.created()
-    assert [c["title"] for c in created] == ["ACME-1: Fix the login form", "ACME-2: Add export"]
+    # Only the key: the subject is untrusted text and the card goes to an autonomous worker.
+    assert [c["title"] for c in created] == ["Specivo issue ACME-1", "Specivo issue ACME-2"]
+    assert not any("Fix the login form" in c["title"] + c["body"] for c in created)
     first = created[0]
     assert first["assignee"] == "worker"  # the plugin's own profile by default
     assert first["idempotency_key"] == "specivo:ACME-1"
     assert f"{BASE_URL}/issue/ACME-1/" in first["body"]
-    assert f"{MARKER} ACME-1" in first["body"]
+    assert f"{MARKER} ACME-1 sig={card_signature(API_KEY, 'ACME-1')}" in first["body"]
     assert "Fix the login form" not in first["body"]  # a reference, not the issue text
     assert sync.snapshot()["cards"]["ACME-1"] == {"task_id": "t_1", "state": "open", "board": None}
 
@@ -83,13 +92,12 @@ def test_dry_run_ticks_and_other_boards_are_ignored(clock: Clock) -> None:
 
 
 def test_selector_tag_and_card_assignee(clock: Clock) -> None:
-    ctx, sync = make(
-        clock, {**SYNC_ON, "project": "OPS", "select": {"assignee": None, "tag": "agent"}, "card_assignee": "coder"}
-    )
+    ctx, sync = make(clock, {**SYNC_ON, "project": "OPS", "select": {"tag": "agent"}, "card_assignee": "coder"})
     serve(ctx, [("OPS-3", "New", "Rotate logs")])
     tick(sync, clock)
     call = ctx.mcp.tool_calls("specivo_list_issues")[0]
-    assert call["project_key"] == "OPS" and call["tag"] == "agent" and "assignee" not in call
+    # A tag narrows the selection; issues are always limited to the plugin's own account.
+    assert call["project_key"] == "OPS" and call["tag"] == "agent" and call["assignee"] == "me"
     assert ctx.board.created()[0]["assignee"] == "coder"
 
 
@@ -221,6 +229,7 @@ def test_a_card_from_another_process_is_recognised_by_its_marker(clock: Clock) -
     # The worker process has its own (empty) state but sees the same board.
     worker, worker_sync = make(clock)
     worker.board = dispatcher.board
+    serve(worker, [("ACME-1", "In Progress", "One")])
     worker_sync.on_task_completed(task_id="t_1", summary="Shipped")
     assert worker.mcp.tool_calls("specivo_update_issue") == [
         {"issue_ref": "ACME-1", "status_id": 3, "notes": "Shipped" + SIGNATURE}
@@ -233,6 +242,87 @@ def test_cards_the_plugin_did_not_make_are_left_alone(clock: Clock) -> None:
     sync.on_task_completed(task_id="t_9", summary="Done")
     sync.on_task_completed(task_id="t_404", summary="Done")
     assert ctx.mcp.tool_calls("specivo_update_issue") == []
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        f"{MARKER} ACME-1",  # the old unsigned marker anyone can type
+        f"{MARKER} ACME-1 sig=00000000000000000000000000000000",
+        f"{MARKER} ACME-1 sig={card_signature('a-different-key', 'ACME-1')}",
+        f"{MARKER} ACME-2 sig={card_signature(API_KEY, 'ACME-1')}",  # a signature copied from another issue
+    ],
+)
+def test_a_forged_marker_is_not_adopted(clock: Clock, body: str) -> None:
+    ctx, sync = make(clock)
+    serve(ctx, [("ACME-1", "In Progress", "One"), ("ACME-2", "In Progress", "Two")])
+    ctx.board.tasks["t_9"] = {"title": "Specivo issue ACME-1", "body": body, "idempotency_key": "specivo:ACME-1"}
+    sync.on_task_claimed(task_id="t_9")
+    sync.on_task_completed(task_id="t_9", summary="Done")
+    sync.on_task_blocked(task_id="t_9", reason="Stop")
+    assert ctx.mcp.tool_calls("specivo_update_issue") == []
+    assert sync.snapshot()["cards"] == {}
+
+
+def test_a_signed_card_outside_the_sync_project_is_not_adopted(clock: Clock) -> None:
+    ctx, sync = make(clock)
+    serve(ctx, [("OTHER-1", "In Progress", "Elsewhere")])
+    ctx.board.tasks["t_9"] = {"title": "x", "body": f"{MARKER} OTHER-1 sig={card_signature(API_KEY, 'OTHER-1')}"}
+    sync.on_task_completed(task_id="t_9", summary="Done")
+    assert ctx.mcp.tool_calls("specivo_update_issue") == []
+
+
+def test_a_signed_card_for_an_issue_outside_the_selection_is_not_adopted(clock: Clock) -> None:
+    ctx, sync = make(clock)
+    serve(ctx, [("ACME-2", "In Progress", "Mine")])  # ACME-1 is not assigned to the plugin's account
+    ctx.board.tasks["t_9"] = {"title": "x", "body": f"{MARKER} ACME-1 sig={card_signature(API_KEY, 'ACME-1')}"}
+    sync.on_task_completed(task_id="t_9", summary="Done")
+    assert ctx.mcp.tool_calls("specivo_update_issue") == []
+
+
+def test_a_second_card_for_a_mapped_issue_is_not_adopted(clock: Clock) -> None:
+    ctx, sync = make(clock)
+    serve(ctx, [("ACME-1", "New", "One")])
+    tick(sync, clock)
+    copy = dict(ctx.board.tasks["t_1"])
+    ctx.board.tasks["t_9"] = copy  # a copy of the real card, signature included
+    sync.on_task_completed(task_id="t_9", summary="Done")
+    assert ctx.mcp.tool_calls("specivo_update_issue") == []
+    assert sync.snapshot()["tasks"] == {"t_1": "ACME-1"}
+
+
+def test_without_the_api_key_no_card_is_signed_or_adopted(clock: Clock, monkeypatch: pytest.MonkeyPatch) -> None:
+    ctx, sync = make(clock)
+    serve(ctx, [("ACME-1", "New", "One")])
+    monkeypatch.delenv("SPECIVO_API_KEY")
+    tick(sync, clock)
+    assert ctx.board.created() == []
+    ctx.board.tasks["t_9"] = {"title": "x", "body": f"{MARKER} ACME-1 sig={card_signature(API_KEY, 'ACME-1')}"}
+    sync.on_task_completed(task_id="t_9", summary="Done")
+    assert ctx.mcp.tool_calls("specivo_update_issue") == []
+
+
+@pytest.mark.parametrize("failure", ["missing", "raises", "not-a-string"])
+def test_a_summary_is_withheld_when_redaction_is_unavailable(clock: Clock, failure: str) -> None:
+    ctx, sync = make(clock)
+    serve(ctx, [("ACME-1", "New", "One")])
+    tick(sync, clock)
+
+    class Broken(FakeCtx):
+        def redact_text(self, text: str, *, force: bool = False) -> str:
+            if failure == "raises":
+                raise RuntimeError("redactor crashed")
+            return None  # type: ignore[return-value]
+
+    broken = Broken(ctx.settings)
+    broken.state, broken.mcp, broken.board = ctx.state, ctx.mcp, ctx.board
+    if failure == "missing":
+        broken.redact_text = None  # type: ignore[assignment,method-assign]
+    worker = KanbanSync(Runtime(broken, clock=clock))
+    worker.on_task_completed(task_id="t_1", summary="Token sk-test-secret rotated.")
+    notes = ctx.mcp.tool_calls("specivo_update_issue")[-1]["notes"]
+    assert "sk-test-secret" not in notes
+    assert notes == REDACTION_UNAVAILABLE + SIGNATURE
 
 
 def test_status_names_resolve_through_the_lookups(clock: Clock) -> None:

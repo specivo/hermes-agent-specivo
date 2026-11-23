@@ -87,7 +87,7 @@ def test_full_settings() -> None:
                 "enabled": True,
                 "board": "ops",
                 "card_assignee": "coder",
-                "select": {"assignee": None, "tag": "agent"},
+                "select": {"tag": "agent"},
                 "poll_seconds": 120,
                 "statuses": {"in_progress": 2, "resolved": "Done", "feedback": "7"},
             },
@@ -102,7 +102,7 @@ def test_full_settings() -> None:
         True,
         "ops",
         "coder",
-        None,
+        "me",
         "agent",
     )
     assert dict(sync.statuses) == {"in_progress": 2, "resolved": "Done", "feedback": 7}
@@ -123,7 +123,8 @@ def test_full_settings() -> None:
         ({"issue_sync": {"statuses": {"done": 3}}}, r"unknown keys \['done'\]"),
         ({"issue_sync": {"statuses": {"resolved": True}}}, "status name or a numeric status id"),
         ({"issue_sync": {"statuses": {"resolved": 0}}}, "positive status id"),
-        ({"issue_sync": {"select": {"assignee": None}}}, "needs an assignee"),
+        ({"issue_sync": {"select": {"assignee": None}}}, "select.assignee must be 'me'"),
+        ({"issue_sync": {"select": {"assignee": "someone-else"}}}, "select.assignee must be 'me'"),
         ({"issue_sync": {"enabled": True}}, "no project is set"),
     ],
 )

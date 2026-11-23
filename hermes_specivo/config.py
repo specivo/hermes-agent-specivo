@@ -136,8 +136,8 @@ class IssueSyncSettings:
     board: str | None = None
     #: Hermes profile the cards are assigned to; ``None`` means the profile the plugin runs in.
     card_assignee: str | None = None
-    #: Which issues: ``assignee`` (``me`` by default) and optionally a ``tag``.
-    assignee: str | None = "me"
+    #: Which issues: always those assigned to the API key's account (``me``), optionally with a ``tag``.
+    assignee: str = "me"
     tag: str | None = None
     poll_seconds: int = DEFAULT_POLL_SECONDS
     statuses: Mapping[str, str | int] = field(default_factory=lambda: dict(DEFAULT_STATUSES))
@@ -185,10 +185,16 @@ def _issue_sync(raw: Mapping[str, Any]) -> IssueSyncSettings:
         name: _status(statuses_raw.get(name), f"{prefix}.statuses.{name}", default)
         for name, default in DEFAULT_STATUSES.items()
     }
-    assignee = _optional_text(select.get("assignee", "me"), f"{prefix}.select.assignee")
+    # Cards go to autonomous workers, so only issues assigned to the plugin's own account become
+    # cards: assigning needs edit rights in the project, while anyone who can file or tag an issue
+    # could otherwise put work on the board. A tag can narrow the selection further.
+    assignee = select.get("assignee", "me")
+    if assignee != "me":
+        raise ConfigError(
+            f"{prefix}.select.assignee must be 'me' (the API key's account); got {assignee!r}. "
+            "Use select.tag to narrow the selection"
+        )
     tag = _optional_text(select.get("tag"), f"{prefix}.select.tag")
-    if assignee is None and tag is None:
-        raise ConfigError(f"{prefix}.select needs an assignee (for example 'me') or a tag, or both")
     return IssueSyncSettings(
         enabled=_bool(raw.get("enabled"), f"{prefix}.enabled", False),
         project=_project_key(raw.get("project"), f"{prefix}.project"),
