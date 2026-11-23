@@ -1,0 +1,42 @@
+# Development tooling only. There is deliberately no [project] table: Hermes reads a plugin's
+# pyproject.toml as its Python declaration, and this plugin has no runtime dependencies (it runs on
+# the standard library plus Hermes's own public API). `uv sync` installs the dev group below.
+
+[dependency-groups]
+dev = [
+    "mypy>=1.13,<2",
+    "pytest>=8.3,<10",
+    "pytest-xdist>=3.6,<4",
+    "pyyaml>=6.0,<7",
+    "ruff>=0.8,<1",
+    "types-pyyaml>=6.0,<7",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v --tb=short --strict-markers -p no:cacheprovider"
+pythonpath = ["."]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+extend-exclude = ["*.md"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP", "B"]
+
+[tool.ruff.lint.per-file-ignores]
+# The repository root is the plugin directory Hermes imports under its own package name.
+"__init__.py" = ["N999"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+files = ["hermes_specivo", "tests"]
+# The root __init__.py makes the checkout look like a package; resolve modules from the root instead.
+explicit_package_bases = true
+mypy_path = "tests"
+
+[[tool.mypy.overrides]]
+module = ["agent", "agent.*", "hermes_cli", "hermes_cli.*"]
+ignore_missing_imports = true

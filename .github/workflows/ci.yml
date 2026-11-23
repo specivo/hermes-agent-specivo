@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python: ["3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+      - run: uv sync --locked --python ${{ matrix.python }}
+      - run: uv run pytest -n 4
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run mypy
+
+  # The plugin loads in the pinned Hermes Agent release and passes the checks the plugin catalog
+  # runs at admission: manifest, declared hooks against registered hooks, requires_env, the
+  # security scan and the "no core override" rule.
+  hermes-validate:
+    runs-on: ubuntu-latest
+    env:
+      HERMES_REF: 8da31006f3bcf70d0df05fb2b5a334eec4db2e07
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: plugin
+      - uses: astral-sh/setup-uv@v7
+      - run: uv tool install --python 3.12 "hermes-agent @ git+https://github.com/NousResearch/hermes-agent@${HERMES_REF}"
+      - name: hermes plugins validate
+        env:
+          HERMES_HOME: ${{ runner.temp }}/hermes-home
+        run: hermes plugins validate "$GITHUB_WORKSPACE/plugin" --install-deps < /dev/null
+      - name: hermes plugins doctor
+        env:
+          HERMES_HOME: ${{ runner.temp }}/hermes-home
+        run: hermes plugins doctor "$GITHUB_WORKSPACE/plugin" --ci < /dev/null

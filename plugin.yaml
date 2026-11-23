@@ -1,0 +1,58 @@
+name: specivo
+version: 0.1.0
+manifest_version: 2
+api_version: 1
+description: >-
+  Specivo as Hermes's tracker, wiki and cost ledger: one `hermes specivo setup` configures the
+  Specivo MCP server and the signed event webhook, the plugin links each Hermes session (and the
+  issue it works on) to Specivo's agent session, and an optional sync turns Specivo issues into
+  Kanban cards and card moves into issue updates.
+author: Specivo
+license: MIT
+homepage: https://github.com/specivo/hermes-agent-specivo
+tags: [issue-tracker, project-management, mcp, kanban, wiki]
+requires_hermes: ">=0.23.3"
+python_dependencies: []
+requires_env:
+  - name: SPECIVO_API_KEY
+    description: "Specivo API key (create one in Specivo under your account's API keys). Sent only to your Specivo server's MCP endpoint."
+    secret: true
+  - name: SPECIVO_WEBHOOK_SECRET
+    description: "Secret of the Hermes receiver you created in Specivo; Hermes signs each event with it."
+    secret: true
+provides_tools: []
+provides_hooks:
+  - pre_llm_call
+  - post_tool_call
+  - on_session_end
+  - on_kanban_dispatch_tick
+  - kanban_task_claimed
+  - kanban_task_completed
+  - kanban_task_blocked
+config_schema:
+  url:
+    type: str
+    default: ""
+    description: "Specivo base address, e.g. https://specivo.example.com (https, or http only on localhost)"
+  mcp_server:
+    type: str
+    default: specivo
+    description: "Name of the mcp_servers entry for Specivo"
+  default_project:
+    type: str
+    default: ""
+    description: "Default Specivo project key, e.g. ACME"
+  context:
+    type: dict
+    default: {inject: true}
+    description: "inject: add the Specivo section and the current-issue line to the prompt"
+  events:
+    type: dict
+    default: {enabled: true}
+    description: "enabled: doctor checks the hooks.outbound entry for the Specivo receiver"
+  issue_sync:
+    type: dict
+    default: {enabled: false}
+    description: >-
+      Kanban sync: enabled, project, board, card_assignee, select {assignee, tag}, poll_seconds,
+      statuses {in_progress, resolved, feedback}
