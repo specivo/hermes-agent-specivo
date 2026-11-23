@@ -20,30 +20,40 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v7
-      - run: uv sync --locked --python ${{ matrix.python }}
-      - run: uv run pytest -n 4
-      - run: uv run ruff check .
-      - run: uv run ruff format --check .
-      - run: uv run mypy
+      # The tools and the supported Pythons are pinned in devtools/ (the plugin root has no
+      # [project] table, so Hermes installs nothing for the plugin).
+      - run: uv sync --locked --project devtools --python ${{ matrix.python }}
+      - run: uv run --project devtools pytest -n 4
+      - run: uv run --project devtools ruff check .
+      - run: uv run --project devtools ruff format --check .
+      - run: uv run --project devtools mypy
 
-  # The plugin loads in the pinned Hermes Agent release and passes the checks the plugin catalog
-  # runs at admission: manifest, declared hooks against registered hooks, requires_env, the
-  # security scan and the "no core override" rule.
+  # The plugin loads in Hermes Agent v0.23.3 and passes the checks the plugin catalog runs at
+  # admission: manifest, declared hooks against registered hooks, requires_env, the security scan
+  # and the "no core override" rule. Hermes is installed the documented way, with its own
+  # install.sh pinned to the release commit; it cannot be built as a wheel (its setup.py refuses
+  # outside its Nix build), so `pip` or `uv tool install` from git does not work.
   hermes-validate:
     runs-on: ubuntu-latest
     env:
-      HERMES_REF: 8da31006f3bcf70d0df05fb2b5a334eec4db2e07
+      HERMES_COMMIT: caafe5389ae585ef77387a962aee05b1bcf17029 # v0.23.3
     steps:
       - uses: actions/checkout@v7
         with:
           path: plugin
-      - uses: astral-sh/setup-uv@v7
-      - run: uv tool install --python 3.12 "hermes-agent @ git+https://github.com/NousResearch/hermes-agent@${HERMES_REF}"
+          persist-credentials: false
+      - name: Install Hermes v0.23.3 with its installer
+        run: |
+          curl -fsSL "https://raw.githubusercontent.com/NousResearch/hermes-agent/${HERMES_COMMIT}/scripts/install.sh" \
+            -o "$RUNNER_TEMP/install.sh"
+          bash "$RUNNER_TEMP/install.sh" --commit "$HERMES_COMMIT" \
+            --dir "$RUNNER_TEMP/hermes-src" --hermes-home "$RUNNER_TEMP/hermes-home" \
+            --non-interactive --skip-browser --skip-computer-use < /dev/null
       - name: hermes plugins validate
         env:
-          HERMES_HOME: ${{ runner.temp }}/hermes-home
-        run: hermes plugins validate "$GITHUB_WORKSPACE/plugin" --install-deps < /dev/null
+          HERMES_HOME: ${{ runner.temp }}/check-home
+        run: '"$HOME/.local/bin/hermes" plugins validate "$GITHUB_WORKSPACE/plugin" --install-deps < /dev/null'
       - name: hermes plugins doctor
         env:
-          HERMES_HOME: ${{ runner.temp }}/hermes-home
-        run: hermes plugins doctor "$GITHUB_WORKSPACE/plugin" --ci < /dev/null
+          HERMES_HOME: ${{ runner.temp }}/check-home
+        run: '"$HOME/.local/bin/hermes" plugins doctor "$GITHUB_WORKSPACE/plugin" --ci < /dev/null'

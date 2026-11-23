@@ -1,16 +1,8 @@
-# Development tooling only. There is deliberately no [project] table: Hermes reads a plugin's
-# pyproject.toml as its Python declaration, and this plugin has no runtime dependencies (it runs on
-# the standard library plus Hermes's own public API). `uv sync` installs the dev group below.
-
-[dependency-groups]
-dev = [
-    "mypy>=1.13,<2",
-    "pytest>=8.3,<10",
-    "pytest-xdist>=3.6,<4",
-    "pyyaml>=6.0,<7",
-    "ruff>=0.8,<1",
-    "types-pyyaml>=6.0,<7",
-]
+# Tool settings only (pytest, ruff, mypy). There is deliberately no [project] table and no
+# dependency group: Hermes reads a plugin's pyproject.toml as its Python declaration, and this plugin
+# has no runtime dependencies (it runs on the standard library plus Hermes's public API). The
+# development tools and the supported Pythons are pinned in devtools/pyproject.toml and its uv.lock;
+# run them with `uv run --project devtools ...` (the Makefile does).
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

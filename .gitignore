@@ -11,6 +11,7 @@ __pycache__/
 .env.*
 .coverage
 .DS_Store
-# Hermes Agent clone of make hermes-validate
-.hermes-src/
-.hermes-check-home/
+# make hermes-validate: Hermes's checkout, a scratch HOME and a copy of the plugin
+.hermes-check/
+# The lock lives in devtools/; a root uv.lock would only come from running uv at the root
+/uv.lock
