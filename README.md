@@ -240,9 +240,14 @@ It protects itself in four ways.
 - A hook counts only if the card, read back on its board, is in the state the hook reports:
   running after a claim, done after a completion, blocked after a block.
 - The comment text is the summary of the card's own run, never the text in the hook payload.
-- A card completed or blocked without a worker run, for example an unclaimed card someone finished
-  by hand, still moves the issue. The comment then says the card was finished outside a worker run
-  and does not copy its text.
+- The run's text is used only when it is the worker's run, which means all of these hold:
+  - it has a duration;
+  - Hermes recorded the expected worker profile on it (`card_assignee`, else the plugin's own
+    profile; Hermes sets this itself when the claim opens the run, and no caller can pass it);
+  - the card is still assigned to that profile.
+- Any other completion or block still moves the issue, for example an unclaimed card someone
+  finished by hand, or a card reassigned to another profile. The comment then says the card was
+  finished outside a worker run and does not copy its text.
 
 Any other card or hook is ignored and a warning is logged. If the proof comment cannot be posted,
 the plugin retries on the next tick. Rotating the API key invalidates the signatures on existing
@@ -365,16 +370,22 @@ those writes are refused.
 ## Development
 
 ```bash
-uv sync
+make install     # uv sync --project devtools
 make test        # pytest, no outside network: fakes for ctx, the MCP server and the Kanban board,
                  # and a stub of the Specivo REST API on 127.0.0.1
 make lint        # ruff and mypy
-make hermes-validate   # the plugin catalog's checks against the pinned Hermes release (needs network)
+make hermes-validate   # the plugin catalog's checks against Hermes v0.23.3 (needs network)
 ```
 
 The repository root is the plugin directory: `plugin.yaml` and `__init__.py`, with the code in
-`hermes_specivo/`. `pyproject.toml` only configures the development tools. It has no `[project]`
-table, so Hermes installs nothing for the plugin.
+`hermes_specivo/`. The root `pyproject.toml` only configures pytest, ruff and mypy. It has no
+`[project]` table, so Hermes installs nothing for the plugin. The tools themselves, and the
+supported Pythons (3.11 to 3.14), are pinned in `devtools/pyproject.toml` and `devtools/uv.lock`.
+
+`make hermes-validate` installs Hermes the documented way, with its own `install.sh` pinned to the
+v0.23.3 release commit. It uses a scratch `HOME` under `.hermes-check/`, so it never touches your own
+Hermes or shell setup. Hermes cannot be installed with `pip` or `uv tool install`: its `setup.py`
+refuses to build a wheel outside its Nix build.
 
 ## License
 

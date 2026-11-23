@@ -112,7 +112,10 @@ class FakeBoard:
     def transition(
         self, event: str, task_id: str, text: str | None = None, board: str = "default", synthesized: bool = False
     ) -> None:
-        """What Hermes does to the card before it fires the lifecycle hook."""
+        """What Hermes does to the card before it fires the lifecycle hook.
+
+        Like Hermes, a run's ``profile`` is the card's assignee when the run is opened.
+        """
         task = self.table(board)[task_id]
         runs = task.setdefault("runs", [])
         if event == "claimed":
@@ -120,6 +123,7 @@ class FakeBoard:
             runs.append(
                 {
                     "id": len(runs) + 1,
+                    "profile": task.get("assignee"),
                     "status": "running",
                     "outcome": None,
                     "summary": None,
@@ -137,6 +141,7 @@ class FakeBoard:
             runs.append(
                 {
                     "id": len(runs) + 1,
+                    "profile": task.get("assignee"),
                     "status": status,
                     "outcome": outcome,
                     "summary": text,

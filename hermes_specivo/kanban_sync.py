@@ -156,11 +156,16 @@ def only_proofs(comments: Any, api_key: str, issue_key: str, board: str, task_id
     return all(_is_proof(comment, expected, issue_key) for comment in comments)
 
 
-def run_text(runs: Any, outcome: str) -> tuple[str | None, bool]:
-    """The summary of the card's latest run with *outcome*, and whether that was a real worker run.
+def run_text(runs: Any, outcome: str, worker_profile: str) -> tuple[str | None, bool]:
+    """The summary of the card's latest run with *outcome*, and whether it was the plugin's worker's run.
 
-    Hermes records a zero-duration run (``started_at == ended_at``) when a card is finished without
-    having been claimed; anyone with Kanban rights can do that, so its text is not trusted.
+    A run is the worker's only when both hold:
+
+    - it has a duration. Hermes records a zero-duration run (``started_at == ended_at``) when a card
+      is finished without having been claimed, which anyone with Kanban rights can do;
+    - its ``profile`` is *worker_profile*. Hermes sets a run's profile itself, from the card's
+      assignee when the claim opens the run; no caller can pass it. A card reassigned to another
+      profile before its claim therefore yields a run that is not the worker's.
     """
     if not isinstance(runs, list):
         return None, False
@@ -174,7 +179,9 @@ def run_text(runs: Any, outcome: str) -> tuple[str | None, bool]:
 
     latest = max(matching, key=run_id)
     started, ended = latest.get("started_at"), latest.get("ended_at")
-    worker_run = started is not None and ended is not None and started != ended
+    worker_run = (
+        started is not None and ended is not None and started != ended and latest.get("profile") == worker_profile
+    )
     summary = latest.get("summary")
     return (summary if isinstance(summary, str) and summary.strip() else None), worker_run
 
@@ -552,7 +559,7 @@ class KanbanSync:
         key = self._issue_for(task_id, board, shown, settings)
         if key is None:
             return
-        new_state, skip_from, status, note = self._plan(event, shown, outcome)
+        new_state, skip_from, status, note = self._plan(event, shown, outcome, settings)
         card = self.snapshot()["cards"].get(key) or {}
         if card.get("state") in skip_from:
             return
@@ -569,13 +576,18 @@ class KanbanSync:
         self._apply(client, key, status_id, self._comment(note) if note is not None else None)
 
     def _plan(
-        self, event: str, shown: dict[str, Any], outcome: str | None
+        self, event: str, shown: dict[str, Any], outcome: str | None, settings: Settings
     ) -> tuple[str, frozenset[str], str, str | None]:
-        """New card state, states that make the hook a repeat, the Specivo status, and the comment text."""
+        """New card state, states that make the hook a repeat, the Specivo status, and the comment text.
+
+        The text is trusted only from the expected worker's own run on a card still assigned to it;
+        otherwise the fixed :data:`SYNTHESIZED_NOTE` is posted instead.
+        """
         if event == "claimed":
             return "claimed", frozenset({"claimed"}) | FINAL, "in_progress", None
-        text, worker_run = run_text(shown.get("runs"), outcome or "")
-        if not worker_run:
+        worker = settings.issue_sync.card_assignee or self.rt.profile_name
+        text, worker_run = run_text(shown.get("runs"), outcome or "", worker)
+        if not worker_run or shown["task"].get("assignee") != worker:
             note = SYNTHESIZED_NOTE
         elif event == "completed":
             note = text or "The Hermes Kanban card was completed."
