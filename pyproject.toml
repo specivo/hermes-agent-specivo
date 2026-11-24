@@ -30,5 +30,5 @@ explicit_package_bases = true
 mypy_path = "tests"
 
 [[tool.mypy.overrides]]
-module = ["agent", "agent.*", "hermes_cli", "hermes_cli.*"]
+module = ["agent", "agent.*", "hermes_cli", "hermes_cli.*", "tools", "tools.*"]
 ignore_missing_imports = true

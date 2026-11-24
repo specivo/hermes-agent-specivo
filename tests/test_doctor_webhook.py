@@ -163,3 +163,28 @@ def test_doctor_skips_the_webhook_when_events_are_off(tmp_path: Path, clock: Clo
     checks = doctor_checks(runtime, configured(tmp_path, receiver=None), http)
     assert all(c.level == "ok" for c in checks)
     assert http.urls == []
+
+
+@pytest.mark.usefixtures("secrets")
+def test_doctor_connects_the_mcp_server_before_whoami(tmp_path: Path, runtime: Runtime, ctx: FakeCtx) -> None:
+    order: list[str] = []
+    original = ctx.call_mcp
+
+    def call_mcp(*args: object, **kwargs: object) -> dict[str, object]:
+        order.append("call")
+        return original(*args, **kwargs)  # type: ignore[arg-type]
+
+    ctx.call_mcp = call_mcp  # type: ignore[method-assign]
+    checks = doctor_checks(runtime, configured(tmp_path), FakeHttp(), connect_mcp=lambda name: order.append(name))
+    assert order[:2] == ["specivo", "call"]
+    assert [c.level for c in checks] == ["ok", "ok", "ok", "ok"]
+
+
+@pytest.mark.usefixtures("secrets")
+def test_doctor_reports_a_failed_connect_and_still_tries_whoami(tmp_path: Path, runtime: Runtime, ctx: FakeCtx) -> None:
+    def broken(name: str) -> None:
+        raise RuntimeError("no MCP SDK")
+
+    checks = doctor_checks(runtime, configured(tmp_path), FakeHttp(), connect_mcp=broken)
+    assert ("warn", "could not connect MCP server 'specivo': no MCP SDK") in [(c.level, c.message) for c in checks]
+    assert ctx.mcp.tool_calls("specivo_whoami") == [{}]
