@@ -324,7 +324,27 @@ class Check:
     message: str
 
 
-def doctor_checks(runtime: Runtime, store: ConfigStore, http_get: HttpGet = default_http_get) -> list[Check]:
+ConnectMcp = Callable[[str], None]
+
+
+def hermes_connect_mcp(server: str) -> None:
+    """Connect MCP ``server`` in this process.
+
+    The gateway connects its MCP servers at startup, but a one-off CLI command such as
+    ``hermes specivo doctor`` does not, so ``ctx.call_mcp`` would find no connection. Hermes's
+    discovery skips servers that are already connected, so calling it twice is harmless.
+    """
+    from tools.mcp_tool_discovery import discover_mcp_tools
+
+    discover_mcp_tools([server])
+
+
+def doctor_checks(
+    runtime: Runtime,
+    store: ConfigStore,
+    http_get: HttpGet = default_http_get,
+    connect_mcp: ConnectMcp | None = None,
+) -> list[Check]:
     checks: list[Check] = []
     settings = runtime.settings()
     if settings is None:
@@ -378,6 +398,11 @@ def doctor_checks(runtime: Runtime, store: ConfigStore, http_get: HttpGet = defa
     else:
         checks.append(Check("ok", f"{API_KEY_ENV} is set"))
         try:
+            if connect_mcp is not None:
+                try:
+                    connect_mcp(settings.mcp_server)
+                except Exception as exc:  # the whoami call below reports what is still wrong
+                    checks.append(Check("warn", f"could not connect MCP server {settings.mcp_server!r}: {exc}"))
             who = runtime.client(settings).whoami()
         except SpecivoError as exc:
             checks.append(Check("fail", f"specivo_whoami: {exc}"))
@@ -416,8 +441,14 @@ def doctor_checks(runtime: Runtime, store: ConfigStore, http_get: HttpGet = defa
     return checks
 
 
-def run_doctor(runtime: Runtime, store: ConfigStore, io: Io, http_get: HttpGet = default_http_get) -> int:
-    checks = doctor_checks(runtime, store, http_get)
+def run_doctor(
+    runtime: Runtime,
+    store: ConfigStore,
+    io: Io,
+    http_get: HttpGet = default_http_get,
+    connect_mcp: ConnectMcp | None = None,
+) -> int:
+    checks = doctor_checks(runtime, store, http_get, connect_mcp)
     for check in checks:
         print(f"[{check.level.upper():4}] {check.message}", file=io.out)
     failed = any(c.level == "fail" for c in checks)
@@ -476,7 +507,7 @@ def make_handler(runtime: Runtime) -> Callable[[argparse.Namespace], int]:
         if command == "setup":
             return run_setup(runtime, args, default_store(), io)
         if command == "doctor":
-            return run_doctor(runtime, default_store(), io)
+            return run_doctor(runtime, default_store(), io, connect_mcp=hermes_connect_mcp)
         if command == "status":
             return run_status(runtime, io)
         print("Usage: hermes specivo {setup,doctor,status}", file=io.out)
