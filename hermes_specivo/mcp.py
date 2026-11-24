@@ -143,6 +143,7 @@ class SpecivoClient:
         self._timeout = timeout
 
     def call(self, tool: str, arguments: dict[str, Any]) -> str:
+        # Only ``None`` means "not given": falsy values such as ``""`` (clear the issue) are sent.
         args = {k: v for k, v in arguments.items() if v is not None}
         try:
             envelope = self._ctx.call_mcp(self.server, tool, args, timeout=self._timeout)
@@ -165,6 +166,10 @@ class SpecivoClient:
         parent_session_id: str | None = None,
         issue_ref: str | None = None,
     ) -> str:
+        """Select (or create) the agent session for *external_session_id* on this MCP connection.
+
+        ``issue_ref=""`` clears the working issue; ``None`` leaves it as it is.
+        """
         return self.call(
             "specivo_agent_session",
             {
@@ -175,8 +180,9 @@ class SpecivoClient:
             },
         )
 
-    def agent_session_get(self) -> str:
-        return self.call("specivo_agent_session", {"op": "get"})
+    def agent_session_get(self, external_session_id: str | None = None) -> str:
+        """The agent session of *external_session_id* on this connection, or the connection's current one."""
+        return self.call("specivo_agent_session", {"op": "get", "external_session_id": external_session_id})
 
     def list_issues(
         self,

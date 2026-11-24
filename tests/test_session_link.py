@@ -25,12 +25,34 @@ def test_first_turn_sets_the_external_session_id_and_parent(link: SessionLink, c
     ]
 
 
-def test_the_link_is_made_once_per_session(link: SessionLink, ctx: FakeCtx) -> None:
+def test_every_turn_selects_the_session_and_only_the_first_sends_parent_and_issue(
+    link: SessionLink, ctx: FakeCtx
+) -> None:
+    link.on_post_tool_call(
+        tool_name=TOOL + "specivo_timer", args={"op": "start", "issue_ref": "ACME-5"}, session_id=SID
+    )
+    link.on_pre_llm_call(session_id=SID, parent_session_id=PARENT, is_first_turn=True)
+    link.on_pre_llm_call(session_id=SID, parent_session_id=PARENT, is_first_turn=False)
+    link.on_pre_llm_call(session_id=SID, parent_session_id=PARENT, is_first_turn=False)
+    assert ctx.mcp.tool_calls("specivo_agent_session") == [
+        {"op": "set", "external_session_id": SID, "parent_session_id": PARENT, "issue_ref": "ACME-5"},
+        {"op": "set", "external_session_id": SID},
+        {"op": "set", "external_session_id": SID},
+    ]
+
+
+def test_no_parent_is_omitted_not_sent_as_null(link: SessionLink, ctx: FakeCtx) -> None:
     link.on_pre_llm_call(session_id=SID, is_first_turn=True)
-    link.on_pre_llm_call(session_id=SID, is_first_turn=False)
-    link.on_pre_llm_call(session_id=SID, is_first_turn=False)
-    calls = ctx.mcp.tool_calls("specivo_agent_session")
-    assert calls == [{"op": "set", "external_session_id": SID}]  # no parent: omitted, not sent as null
+    assert ctx.mcp.tool_calls("specivo_agent_session") == [{"op": "set", "external_session_id": SID}]
+
+
+def test_sessions_sharing_a_connection_each_select_their_own(link: SessionLink, ctx: FakeCtx) -> None:
+    """A subagent's turn between two parent turns: each turn re-selects its own session row."""
+    link.on_pre_llm_call(session_id=SID, is_first_turn=True)
+    link.on_pre_llm_call(session_id=PARENT, is_first_turn=True)
+    link.on_pre_llm_call(session_id=SID)
+    selected = [call["external_session_id"] for call in ctx.mcp.tool_calls("specivo_agent_session")]
+    assert selected == [SID, PARENT, SID]
 
 
 def test_a_resumed_session_is_linked_on_its_first_seen_turn(link: SessionLink, ctx: FakeCtx) -> None:
@@ -45,9 +67,24 @@ def test_a_failed_link_is_retried_after_a_pause(link: SessionLink, ctx: FakeCtx,
     link.on_pre_llm_call(session_id=SID)  # within the pause: no call, the turn is not slowed down
     assert len(ctx.mcp.tool_calls("specivo_agent_session")) == 1
     clock.now += LINK_RETRY_SECONDS
+    link.on_pre_llm_call(session_id=SID, parent_session_id=PARENT)
+    link.on_pre_llm_call(session_id=SID, parent_session_id=PARENT)
+    assert ctx.mcp.tool_calls("specivo_agent_session")[1:] == [
+        {"op": "set", "external_session_id": SID, "parent_session_id": PARENT},  # still unlinked: full set
+        {"op": "set", "external_session_id": SID},  # linked: a plain select
+    ]
+
+
+def test_a_failed_select_after_linking_also_pauses(link: SessionLink, ctx: FakeCtx, clock: Clock) -> None:
+    link.on_pre_llm_call(session_id=SID, is_first_turn=True)
+    ctx.mcp.handlers["specivo_agent_session"] = RuntimeError("unreachable")
     link.on_pre_llm_call(session_id=SID)
     link.on_pre_llm_call(session_id=SID)
     assert len(ctx.mcp.tool_calls("specivo_agent_session")) == 2
+    clock.now += LINK_RETRY_SECONDS
+    ctx.mcp.handlers["specivo_agent_session"] = lambda a: "Agent session selected."
+    link.on_pre_llm_call(session_id=SID)
+    assert ctx.mcp.tool_calls("specivo_agent_session")[-1] == {"op": "set", "external_session_id": SID}
 
 
 def test_nothing_happens_before_setup(clock: Clock) -> None:
@@ -100,19 +137,31 @@ def test_a_comment_only_update_does_not_change_the_issue(link: SessionLink) -> N
     assert link.current_issue(SID) == (None, None)
 
 
-def test_resolving_the_current_issue_clears_it(link: SessionLink) -> None:
+def test_resolving_the_current_issue_clears_it_here_and_on_specivo(link: SessionLink, ctx: FakeCtx) -> None:
     update = TOOL + "specivo_update_issue"
     link.on_post_tool_call(tool_name=update, args={"issue_ref": "ACME-12", "status_id": 2}, session_id=SID)
     link.on_post_tool_call(tool_name=update, args={"issue_ref": "ACME-12", "status_id": 3}, session_id=SID)
     assert link.current_issue(SID) == (None, None)
+    assert ctx.mcp.tool_calls("specivo_agent_session") == [
+        {"op": "set", "external_session_id": SID, "issue_ref": ""}  # the empty string is sent, not dropped
+    ]
     assert link.on_pre_llm_call(session_id=SID) is None
 
 
-def test_resolving_another_issue_keeps_the_current_one(link: SessionLink) -> None:
+def test_a_failed_clear_on_resolve_still_clears_the_cache(link: SessionLink, ctx: FakeCtx) -> None:
+    update = TOOL + "specivo_update_issue"
+    link.on_post_tool_call(tool_name=update, args={"issue_ref": "ACME-12", "status_id": 2}, session_id=SID)
+    ctx.mcp.handlers["specivo_agent_session"] = RuntimeError("unreachable")
+    link.on_post_tool_call(tool_name=update, args={"issue_ref": "ACME-12", "status_id": 5}, session_id=SID)
+    assert link.current_issue(SID) == (None, None)
+
+
+def test_resolving_another_issue_keeps_the_current_one(link: SessionLink, ctx: FakeCtx) -> None:
     update = TOOL + "specivo_update_issue"
     link.on_post_tool_call(tool_name=update, args={"issue_ref": "ACME-12", "status_id": 2}, session_id=SID)
     link.on_post_tool_call(tool_name=update, args={"issue_ref": "ACME-9", "status_id": 5}, session_id=SID)
     assert link.current_issue(SID) == ("ACME-12", "In Progress")
+    assert ctx.mcp.tool_calls("specivo_agent_session") == []
 
 
 def test_the_status_list_is_read_once_and_cached(link: SessionLink, ctx: FakeCtx) -> None:
@@ -132,6 +181,25 @@ def test_timer_start_and_explicit_set_mark_the_issue(link: SessionLink) -> None:
     link.on_post_tool_call(
         tool_name=TOOL + "specivo_agent_session", args={"op": "set", "issue_ref": "ACME-7"}, session_id=SID
     )
+    assert link.current_issue(SID) == ("ACME-7", None)
+
+
+@pytest.mark.parametrize("empty", ["", "  "])
+def test_an_explicit_set_with_an_empty_issue_clears_it(link: SessionLink, empty: str) -> None:
+    tool = TOOL + "specivo_agent_session"
+    link.on_post_tool_call(tool_name=tool, args={"op": "set", "issue_ref": "ACME-7"}, session_id=SID)
+    link.on_post_tool_call(tool_name=tool, args={"op": "get", "issue_ref": empty}, session_id=SID)
+    assert link.current_issue(SID) == ("ACME-7", None)  # only a set clears
+    link.on_post_tool_call(tool_name=tool, args={"op": "set", "issue_ref": empty}, session_id=SID, status="error")
+    assert link.current_issue(SID) == ("ACME-7", None)  # a failed call changes nothing
+    link.on_post_tool_call(tool_name=tool, args={"op": "set", "issue_ref": empty}, session_id=SID)
+    assert link.current_issue(SID) == (None, None)
+
+
+def test_an_explicit_set_without_issue_ref_keeps_it(link: SessionLink) -> None:
+    tool = TOOL + "specivo_agent_session"
+    link.on_post_tool_call(tool_name=tool, args={"op": "set", "issue_ref": "ACME-7"}, session_id=SID)
+    link.on_post_tool_call(tool_name=tool, args={"op": "set", "external_session_id": SID}, session_id=SID)
     assert link.current_issue(SID) == ("ACME-7", None)
 
 
@@ -180,9 +248,11 @@ def test_slash_issue_sets_it_on_specivo_and_locally(link: SessionLink, ctx: Fake
         {"op": "set", "external_session_id": SID, "issue_ref": "ACME-12"}
     ]
     assert link.current_issue(SID) == ("ACME-12", None)
-    # Already linked: the next turn does not call set again, and it carries the context line.
-    assert link.on_pre_llm_call(session_id=SID) == {"context": "Current Specivo issue: ACME-12"}
-    assert len(ctx.mcp.tool_calls("specivo_agent_session")) == 1
+    # Already linked: the next turn only selects the session, and it carries the context line.
+    assert link.on_pre_llm_call(session_id=SID, parent_session_id=PARENT) == {
+        "context": "Current Specivo issue: ACME-12"
+    }
+    assert ctx.mcp.tool_calls("specivo_agent_session")[1:] == [{"op": "set", "external_session_id": SID}]
 
 
 def test_slash_issue_reports_a_refusal(link: SessionLink, ctx: FakeCtx) -> None:
@@ -191,21 +261,42 @@ def test_slash_issue_reports_a_refusal(link: SessionLink, ctx: FakeCtx) -> None:
     assert link.current_issue(SID) == (None, None)
 
 
-def test_slash_issue_clear_and_bad_input(link: SessionLink) -> None:
+def test_slash_issue_clear_and_bad_input(link: SessionLink, ctx: FakeCtx) -> None:
     link.command("issue ACME-12", session_id=SID)
     assert "cleared" in link.command("issue clear", session_id=SID)
+    assert ctx.mcp.tool_calls("specivo_agent_session")[-1] == {
+        "op": "set",
+        "external_session_id": SID,
+        "issue_ref": "",  # the empty string is sent, not dropped
+    }
     assert link.current_issue(SID) == (None, None)
     assert "not an issue key" in link.command("issue twelve", session_id=SID)
     assert "No session" in link.command("issue ACME-1", session_id=None)
     assert link.command("", session_id=SID).startswith("Usage")
 
 
-def test_slash_status_shows_both_sides(link: SessionLink) -> None:
+def test_slash_issue_clear_reports_a_failure_and_still_forgets_locally(link: SessionLink, ctx: FakeCtx) -> None:
     link.command("issue ACME-12", session_id=SID)
+    ctx.mcp.handlers["specivo_agent_session"] = RuntimeError("unreachable")
+    text = link.command("issue clear", session_id=SID)
+    assert "cleared" in text and "unreachable" in text
+    assert link.current_issue(SID) == (None, None)
+
+
+def test_slash_status_shows_both_sides(link: SessionLink, ctx: FakeCtx) -> None:
+    link.command("issue ACME-12", session_id=SID)
+    ctx.mcp.handlers["specivo_agent_session"] = lambda a: f"external_session_id: {a.get('external_session_id')}"
     text = link.command("status", session_id=SID)
     assert f"Hermes session: {SID}" in text
     assert "Current issue (this plugin): ACME-12" in text
     assert "Specivo agent session:" in text
+    assert ctx.mcp.tool_calls("specivo_agent_session")[-1] == {"op": "get", "external_session_id": SID}
+    assert f"  external_session_id: {SID}" in text
+
+
+def test_slash_status_without_a_session_shows_the_connection(link: SessionLink, ctx: FakeCtx) -> None:
+    link.command("status", session_id=None)
+    assert ctx.mcp.tool_calls("specivo_agent_session") == [{"op": "get"}]
 
 
 def test_slash_before_setup(clock: Clock) -> None:

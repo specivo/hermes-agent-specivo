@@ -136,3 +136,25 @@ def test_client_turns_failures_into_specivo_errors() -> None:
 
     with pytest.raises(SpecivoError, match="timed out"):
         SpecivoClient(Exploding(), "specivo").whoami()
+
+
+def test_agent_session_set_sends_an_empty_issue_ref_and_drops_none() -> None:
+    ctx = FakeCtx()
+    client = SpecivoClient(ctx, "specivo")
+    client.agent_session_set(external_session_id="s1", issue_ref="")
+    client.agent_session_set(external_session_id="s1", issue_ref=None)
+    assert ctx.mcp.tool_calls("specivo_agent_session") == [
+        {"op": "set", "external_session_id": "s1", "issue_ref": ""},
+        {"op": "set", "external_session_id": "s1"},
+    ]
+
+
+def test_agent_session_get_names_the_session() -> None:
+    ctx = FakeCtx()
+    client = SpecivoClient(ctx, "specivo")
+    client.agent_session_get(external_session_id="s1")
+    client.agent_session_get()
+    assert ctx.mcp.tool_calls("specivo_agent_session") == [
+        {"op": "get", "external_session_id": "s1"},
+        {"op": "get"},
+    ]

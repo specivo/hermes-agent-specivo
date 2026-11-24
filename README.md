@@ -149,10 +149,17 @@ with the same message.
 
 ## Current issue
 
-On the first turn of a session, and the first time it sees a resumed session, the plugin calls
-`specivo_agent_session(op="set")` with Hermes's `session_id` and parent session id. Specivo then
-joins AI usage (from the [AI usage reporter](https://github.com/specivo/ai-usage-reporter)) and
-webhook events to that agent session by id.
+Before every turn the plugin calls `specivo_agent_session(op="set")` with Hermes's `session_id`.
+Specivo keeps one agent session per Hermes session on the MCP connection and makes it the current
+one, so subagents and gateway chats that share one connection each get their own Specivo agent
+session. The first call for a session (a new one, or a resumed one the plugin has not seen) also
+sends the parent session id. Specivo then joins AI usage (from the
+[AI usage reporter](https://github.com/specivo/ai-usage-reporter)) and webhook events to that agent
+session by id. This needs Specivo 0.15.0 or later.
+
+Tool calls that run at the same time on one connection still go to whichever session was selected
+last. If that matters, for example for subagents that run in parallel, give each its own
+`mcp_servers` entry, so each has its own connection.
 
 The current issue is set when the agent:
 
@@ -162,12 +169,13 @@ The current issue is set when the agent:
 - calls `specivo_agent_session` with an issue.
 
 Specivo records the issue itself; the plugin keeps a copy only to add the context line. Resolving
-or closing the current issue clears it. You can also set it yourself:
+or closing the current issue clears it, here and on Specivo, and so does a `specivo_agent_session`
+set with an empty `issue_ref`. You can also set it yourself:
 
 ```text
 /specivo issue ACME-12    set the issue this session works on (also tells Specivo)
-/specivo issue clear      forget it for this session
-/specivo status           the Hermes session, the issue and Specivo's agent session
+/specivo issue clear      clear it for this session (also tells Specivo)
+/specivo status           the Hermes session, the issue and this session's Specivo agent session
 ```
 
 ## Kanban sync

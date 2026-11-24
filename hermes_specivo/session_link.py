@@ -1,12 +1,17 @@
 """The current issue: links the Hermes session to Specivo's agent session and keeps the issue it works on.
 
-- ``pre_llm_call``: the first time a session is seen, ``specivo_agent_session(op="set")`` records
-  Hermes's ``session_id`` (and its parent) on the agent session of the MCP connection, so usage
-  and webhook events join by id. When the current issue is known, the turn gets one context line.
+- ``pre_llm_call``: every turn calls ``specivo_agent_session(op="set", external_session_id=...)``
+  with Hermes's ``session_id``. Specivo keeps one agent session per external id on the MCP
+  connection and makes it the connection's current one, so subagents and gateway chats that share
+  the connection each get their own, and usage and webhook events join by id. The parent session
+  id and the cached issue go along only until the session is linked. When the current issue is
+  known, the turn gets one context line.
 - ``post_tool_call``: when the agent starts work on an issue through Specivo's own tools (status or
   assignee change, timer start, a new issue, an explicit ``specivo_agent_session`` set), the key is
-  cached for that session. Specivo records the working issue itself; the cache feeds the prompt.
-- ``/specivo issue KEY`` sets it by hand, ``/specivo status`` shows it.
+  cached for that session; an explicit set with an empty issue clears it. Specivo records the
+  working issue itself; the cache feeds the prompt.
+- ``/specivo issue KEY`` sets it by hand, ``/specivo issue clear`` clears it on both sides,
+  ``/specivo status`` shows it.
 """
 
 from __future__ import annotations
@@ -15,6 +20,7 @@ import logging
 import re
 from typing import Any
 
+from .config import Settings
 from .mcp import ISSUE_KEY_RE, SpecivoError, first_issue_key
 from .runtime import Runtime
 from .state import update_state
@@ -23,7 +29,8 @@ logger = logging.getLogger(__name__)
 
 SESSIONS_KEY = "sessions"
 MAX_SESSIONS = 200
-#: After a failed link, turns skip the call for this long, so an unreachable server does not slow every turn.
+#: After a failed link or select, turns skip the call for this long, so an unreachable server does not slow
+#: every turn.
 LINK_RETRY_SECONDS = 300
 _SESSION_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,200}$")
 _EXACT_KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]*-\d+$")
@@ -82,18 +89,8 @@ class SessionLink:
         if settings is None or sid is None:
             return None
         entry = self._entry(sid)
-        if not entry.get("linked") and self.rt.clock() >= self._retry_after:
-            # The first turn, or a resumed session this profile has not linked yet.
-            parent = valid_session_id(parent_session_id)
-            try:
-                self.rt.client(settings).agent_session_set(
-                    external_session_id=sid, parent_session_id=parent, issue_ref=entry.get("issue")
-                )
-            except SpecivoError as exc:
-                self._retry_after = self.rt.clock() + LINK_RETRY_SECONDS
-                self.rt.warn_once(f"link:{sid}", "specivo: could not link session %s: %s", sid, exc)
-            else:
-                self._save(sid, linked=True, parent=parent)
+        if self.rt.clock() >= self._retry_after:
+            self._select(settings, sid, entry, parent_session_id)
         if not settings.context_inject:
             return None
         issue, status = entry.get("issue"), entry.get("status")
@@ -101,6 +98,36 @@ class SessionLink:
             return None
         suffix = f" ({status})" if status else ""
         return {"context": f"Current Specivo issue: {issue}{suffix}"}
+
+    def _select(self, settings: Settings, sid: str, entry: dict[str, Any], parent_session_id: str) -> None:
+        """Make *sid* the connection's current agent session; on its first turn also link parent and issue.
+
+        The call is made on every turn, never skipped from a cache of the last selected id: other
+        sessions on the connection (subagents, gateway chats, the agent's own
+        ``specivo_agent_session`` calls) and an MCP reconnect change the server's selection without
+        this plugin seeing it. Re-selecting the current session is cheap and writes no audit entry.
+        """
+        linked = bool(entry.get("linked"))
+        parent = None if linked else valid_session_id(parent_session_id)
+        issue = None if linked else entry.get("issue")
+        try:
+            client = self.rt.client(settings)
+            client.agent_session_set(external_session_id=sid, parent_session_id=parent, issue_ref=issue)
+        except SpecivoError as exc:
+            self._retry_after = self.rt.clock() + LINK_RETRY_SECONDS
+            self.rt.warn_once(f"link:{sid}", "specivo: could not link session %s: %s", sid, exc)
+            return
+        if not linked:
+            # The first turn, or a resumed session this profile has not linked yet.
+            self._save(sid, linked=True, parent=parent)
+
+    def _clear_on_specivo(self, settings: Settings, sid: str) -> SpecivoError | None:
+        """Clear the working issue of *sid*'s agent session; the failure, if any, is returned."""
+        try:
+            self.rt.client(settings).agent_session_set(external_session_id=sid, issue_ref="")
+        except SpecivoError as exc:
+            return exc
+        return None
 
     def on_post_tool_call(
         self,
@@ -127,8 +154,11 @@ class SessionLink:
             self._from_status_change(sid, issue_ref, args.get("status_id"))
         elif tool == "specivo_timer" and args.get("op") == "start" and issue_ref:
             self._set_issue(sid, issue_ref, None)
-        elif tool == "specivo_agent_session" and args.get("op") == "set" and issue_ref:
-            self._set_issue(sid, issue_ref, None)
+        elif tool == "specivo_agent_session" and args.get("op") == "set" and issue_ref is not None:
+            if issue_ref.strip():
+                self._set_issue(sid, issue_ref, None)
+            else:  # Specivo clears the working issue on an empty (or blank) issue_ref
+                self._save(sid, issue=None, status=None)
         elif tool == "specivo_create_issue":
             key = first_issue_key(result if isinstance(result, str) else str(result or ""))
             if key:
@@ -144,6 +174,9 @@ class SessionLink:
                 current, _ = self.current_issue(sid)
                 if current == issue_ref:
                     self._save(sid, issue=None, status=None)
+                    failure = self._clear_on_specivo(settings, sid) if settings else None
+                    if failure is not None:
+                        logger.warning("specivo: could not clear the working issue of session %s: %s", sid, failure)
                 return
             status_name = info.name if info else None
         self._set_issue(sid, issue_ref, status_name)
@@ -183,8 +216,11 @@ class SessionLink:
             if sid is None:
                 return "No session is active here, so there is nothing to attach the issue to."
             if words[1] == "clear":
+                failure = self._clear_on_specivo(settings, sid)
                 self._save(sid, issue=None, status=None)
-                return "Current Specivo issue cleared for this session (Specivo keeps its own record)."
+                if failure is not None:
+                    return f"Current Specivo issue cleared here; Specivo could not be updated: {failure}"
+                return "Current Specivo issue cleared for this session, here and on Specivo."
             key = words[1].upper()
             if not ISSUE_KEY_RE.fullmatch(key):
                 return f"{words[1]!r} is not an issue key such as ACME-12."
@@ -206,7 +242,8 @@ class SessionLink:
         if settings is not None:
             try:
                 lines.append("Specivo agent session:")
-                lines.extend(f"  {line}" for line in self.rt.client(settings).agent_session_get().splitlines())
+                shown = self.rt.client(settings).agent_session_get(external_session_id=sid)
+                lines.extend(f"  {line}" for line in shown.splitlines())
             except SpecivoError as exc:
                 lines.append(f"  unavailable: {exc}")
         return "\n".join(lines)
