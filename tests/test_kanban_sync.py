@@ -17,6 +17,7 @@ from hermes_specivo.kanban_sync import (
     card_idempotency_key,
     card_signature,
 )
+from hermes_specivo.mcp import SpecivoError
 from hermes_specivo.runtime import REDACTION_UNAVAILABLE, Runtime
 
 SYNC_ON: dict[str, Any] = {"enabled": True, "poll_seconds": 60}
@@ -31,7 +32,8 @@ def _api_key(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def make(clock: Clock, issue_sync: dict[str, Any] | None = None, **settings: Any) -> tuple[FakeCtx, KanbanSync]:
     ctx = FakeCtx({"url": BASE_URL, "default_project": "ACME", "issue_sync": issue_sync or SYNC_ON, **settings})
-    return ctx, KanbanSync(Runtime(ctx, clock=clock))
+    # These tests read issues over the MCP stub; RestIssueSource has its own tests below.
+    return ctx, KanbanSync(Runtime(ctx, clock=clock), issue_source=lambda settings, client: client)
 
 
 def serve(ctx: FakeCtx, rows: list[tuple[str, str, str]], total: int | None = None) -> None:
@@ -767,3 +769,48 @@ def test_the_configured_card_assignee_is_the_expected_run_profile(clock: Clock) 
     fire(ctx, sync, "claimed", "t_1")
     fire(ctx, sync, "completed", "t_1", "Shipped by the coder profile")
     assert updates(ctx)[-1]["notes"] == "Shipped by the coder profile" + SIGNATURE
+
+
+# -- the poll over REST ------------------------------------------------------------------------
+
+
+def test_the_rest_poll_is_background_and_pages(monkeypatch: pytest.MonkeyPatch) -> None:
+    from specivo_stub import running_stub
+
+    from hermes_specivo.kanban_sync import RestIssueSource, default_issue_source
+    from hermes_specivo.memory.client import RestClient
+
+    with running_stub() as stub:
+        stub.issues = [
+            {
+                "key": f"ACME-{n}",
+                "subject": f"Task {n}",
+                "status": {"id": 1, "name": "New"},
+                "tag_ids": [7] if n % 2 else [],
+            }
+            for n in range(1, 151)
+        ]
+        stub.tags = [{"id": 7, "name": "Agent"}]
+        source = RestIssueSource(RestClient(stub.url, API_KEY))
+        rows, complete = source.iter_open_issues("ACME", assignee="me", tag=None)
+        assert complete and len(rows) == 150
+        assert (rows[0].key, rows[0].status, rows[0].subject) == ("ACME-1", "New", "Task 1")
+        calls = stub.calls("GET", "/api/v1/projects/ACME/issues/")
+        assert len(calls) == 2  # pages of 100
+        assert all(c.headers.get("X-Agent-Background") == "1" and "X-Agent-Session-Id" not in c.headers for c in calls)
+        assert calls[0].query["assigned_to_id"] == "me" and calls[0].query["status"] == "open"
+
+        tagged, _ = source.iter_open_issues("ACME", assignee="me", tag="agent")
+        assert len(tagged) == 75 and stub.calls("GET", "/api/v1/projects/ACME/issues/")[-1].query["tag_id"] == "7"
+        with pytest.raises(SpecivoError, match="does not exist"):
+            source.iter_open_issues("ACME", assignee="me", tag="nope")
+
+        stub.refuse[("GET", "/api/v1/projects/")] = 503
+        with pytest.raises(SpecivoError):
+            source.iter_open_issues("ACME", assignee="me", tag=None)
+
+    settings = load_settings(lambda key, default: {"url": BASE_URL}.get(key, default))
+    assert isinstance(default_issue_source(settings, None), RestIssueSource)  # type: ignore[arg-type]
+    monkeypatch.delenv("SPECIVO_API_KEY")
+    marker = object()
+    assert default_issue_source(settings, marker) is marker  # type: ignore[arg-type]

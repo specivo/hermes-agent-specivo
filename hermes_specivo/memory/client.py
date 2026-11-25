@@ -17,6 +17,8 @@ from urllib.parse import quote, urlencode
 
 #: The header naming the Hermes session a call belongs to, so Specivo files it under that session.
 SESSION_HEADER = "X-Agent-Session-Id"
+#: The header marking a call as the plugin's own housekeeping: Specivo opens no agent session for it.
+BACKGROUND_HEADER = "X-Agent-Background"
 #: The session id shape Specivo stores; anything else is not sent.
 _SESSION_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,199}")
 #: The largest answer read from Specivo; a search page of 10 hits is a few kilobytes.
@@ -72,6 +74,8 @@ class RestClient:
         self.timeout = timeout
         #: The Hermes session the calls belong to (sent as ``X-Agent-Session-Id``), when known.
         self.session_id: str | None = None
+        #: The plugin's own housekeeping (a sync poll): no agent session, no session id.
+        self.background = False
 
     def _request(
         self,
@@ -91,7 +95,9 @@ class RestClient:
         request.add_header("Accept", "application/json")
         request.add_header("User-Agent", USER_AGENT)
         session_id = self.session_id
-        if session_id and _SESSION_ID.fullmatch(session_id):
+        if self.background:
+            request.add_header(BACKGROUND_HEADER, "1")
+        elif session_id and _SESSION_ID.fullmatch(session_id):
             request.add_header(SESSION_HEADER, session_id)
         if data is not None:
             request.add_header("Content-Type", "application/json")
@@ -126,6 +132,33 @@ class RestClient:
         )
         items = data.get("items") if isinstance(data, dict) else None
         return [item for item in items if isinstance(item, dict)] if isinstance(items, list) else []
+
+    def list_issues(
+        self, project_key: str, *, assigned_to: str = "me", tag_id: int | None = None, offset: int = 0, limit: int = 100
+    ) -> dict[str, Any]:
+        """One page of the project's open issues: ``{items: [...], total_count, ...}``."""
+        data = self._request(
+            "GET",
+            f"/projects/{quote(project_key, safe='')}/issues/",
+            query={
+                "status": "open",
+                "assigned_to_id": assigned_to,
+                "tag_id": tag_id,
+                "offset": offset,
+                "limit": limit,
+                "sort": "created_at:asc",
+            },
+        )
+        return data if isinstance(data, dict) else {}
+
+    def tag_id(self, project_key: str, name: str) -> int | None:
+        """The id of the project's tag *name* (case-insensitive), or ``None``."""
+        data = self._request("GET", f"/projects/{quote(project_key, safe='')}/tags/search/", query={"q": name})
+        wanted = name.strip().casefold()
+        for tag in data if isinstance(data, list) else []:
+            if isinstance(tag, dict) and str(tag.get("name", "")).casefold() == wanted:
+                return int(tag["id"])
+        return None
 
     def get_page(self, project_key: str, slug: str) -> WikiPage | None:
         """A wiki page, or ``None`` when it does not exist."""

@@ -50,10 +50,12 @@ import hmac
 import json
 import logging
 import re
-from typing import Any
+from collections.abc import Callable
+from typing import Any, Protocol
 
 from .config import API_KEY_ENV, Settings, get_secret, normalize_board
-from .mcp import SpecivoClient, SpecivoError, resolve_status_id
+from .mcp import IssueRow, SpecivoClient, SpecivoError, resolve_status_id
+from .memory.client import RestClient, SpecivoApiError
 from .runtime import Runtime
 from .state import update_state
 
@@ -228,9 +230,81 @@ def _clip(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
+class IssueSource(Protocol):
+    """Where the poll reads open issues: ``(rows, complete)``, complete when every match was read."""
+
+    def iter_open_issues(
+        self, project_key: str, *, assignee: str | None, tag: str | None
+    ) -> tuple[list[IssueRow], bool]: ...
+
+
+IssueSourceFactory = Callable[[Settings, SpecivoClient], IssueSource]
+
+#: The most issues one poll reads, and how many per request.
+MAX_POLLED_ISSUES = 500
+POLL_PAGE_SIZE = 100
+
+
+class RestIssueSource:
+    """The poll over Specivo's REST API, marked as background housekeeping (``X-Agent-Background``).
+
+    Polling every few minutes is the plugin's own work, not the agent's: over MCP each poll was a
+    tool call of whatever conversation was current on the shared connection, kept that agent
+    session looking active and wrote an audit row. Over REST with the background header Specivo
+    opens no session for it and audits no read.
+    """
+
+    def __init__(self, rest: RestClient) -> None:
+        rest.background = True
+        self._rest = rest
+
+    def iter_open_issues(
+        self, project_key: str, *, assignee: str | None, tag: str | None
+    ) -> tuple[list[IssueRow], bool]:
+        try:
+            tag_id = None
+            if tag:
+                tag_id = self._rest.tag_id(project_key, tag)
+                if tag_id is None:
+                    raise SpecivoError(f"tag {tag!r} does not exist in {project_key}")
+            rows: list[IssueRow] = []
+            offset = 0
+            while True:
+                page = self._rest.list_issues(
+                    project_key, assigned_to=assignee or "me", tag_id=tag_id, offset=offset, limit=POLL_PAGE_SIZE
+                )
+                items = [i for i in page.get("items") or [] if isinstance(i, dict)]
+                total = int(page.get("total_count") or 0)
+                for item in items:
+                    status = item.get("status") or {}
+                    rows.append(
+                        IssueRow(
+                            key=str(item.get("key", "")),
+                            status=str(status.get("name", "") if isinstance(status, dict) else status),
+                            subject=str(item.get("subject", "")),
+                        )
+                    )
+                offset += len(items)
+                if not items or offset >= total:
+                    return rows, True
+                if offset >= MAX_POLLED_ISSUES:
+                    return rows, False
+        except SpecivoApiError as exc:
+            raise SpecivoError(str(exc)) from None
+
+
+def default_issue_source(settings: Settings, client: SpecivoClient) -> IssueSource:
+    """REST with the background header when the API key is at hand, else the MCP connection."""
+    api_key = get_secret(API_KEY_ENV)
+    if settings.url is None or api_key is None:
+        return client
+    return RestIssueSource(RestClient(settings.url, api_key))
+
+
 class KanbanSync:
-    def __init__(self, runtime: Runtime) -> None:
+    def __init__(self, runtime: Runtime, issue_source: IssueSourceFactory | None = None) -> None:
         self.rt = runtime
+        self._issue_source = issue_source or default_issue_source
 
     # -- state -------------------------------------------------------------------------------
 
@@ -365,7 +439,9 @@ class KanbanSync:
         project = settings.sync_project()
         if project is None:
             return
-        rows, complete = client.iter_open_issues(project, assignee=sync.assignee, tag=sync.tag)
+        rows, complete = self._issue_source(settings, client).iter_open_issues(
+            project, assignee=sync.assignee, tag=sync.tag
+        )
         statuses = self.rt.statuses().get(client)
         finished = {s.name.casefold() for s in statuses if s.is_finished}
         if not statuses and isinstance(sync.statuses["resolved"], str):
