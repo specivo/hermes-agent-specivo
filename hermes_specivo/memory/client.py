@@ -8,12 +8,17 @@ that account may see, and writes need its permissions (edit wiki pages, add issu
 from __future__ import annotations
 
 import json
+import re
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import quote, urlencode
 
+#: The header naming the Hermes session a call belongs to, so Specivo files it under that session.
+SESSION_HEADER = "X-Agent-Session-Id"
+#: The session id shape Specivo stores; anything else is not sent.
+_SESSION_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,199}")
 #: The largest answer read from Specivo; a search page of 10 hits is a few kilobytes.
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 USER_AGENT = "hermes-agent-specivo"
@@ -65,6 +70,8 @@ class RestClient:
         self._api = f"{base_url.rstrip('/')}/api/v1"
         self._api_key = api_key
         self.timeout = timeout
+        #: The Hermes session the calls belong to (sent as ``X-Agent-Session-Id``), when known.
+        self.session_id: str | None = None
 
     def _request(
         self,
@@ -83,6 +90,9 @@ class RestClient:
         request.add_header("Authorization", f"Bearer {self._api_key}")
         request.add_header("Accept", "application/json")
         request.add_header("User-Agent", USER_AGENT)
+        session_id = self.session_id
+        if session_id and _SESSION_ID.fullmatch(session_id):
+            request.add_header(SESSION_HEADER, session_id)
         if data is not None:
             request.add_header("Content-Type", "application/json")
         try:

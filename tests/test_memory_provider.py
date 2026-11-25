@@ -121,6 +121,22 @@ def test_first_turn_prefetch_hit(stub: StubSpecivo) -> None:
     assert request.headers["Authorization"] == f"Bearer {KEY}"
 
 
+def test_calls_name_the_hermes_session(stub: StubSpecivo) -> None:
+    """Specivo files the provider's REST calls under the Hermes session, beside its MCP calls and events."""
+    stub.search_items = [ISSUE]
+    provider = ready(stub)
+    provider.prefetch("why does the backup check fail?", session_id="s1")
+    assert {r.headers.get("X-Agent-Session-Id") for r in stub.calls("GET", "/api/v1/search/")} == {"s1"}
+
+    provider.on_session_switch("20260929_165300_77812665")
+    provider.prefetch("and the restore check?", session_id="20260929_165300_77812665")
+    assert stub.calls("GET", "/api/v1/search/")[-1].headers.get("X-Agent-Session-Id") == "20260929_165300_77812665"
+
+    provider.on_session_switch("../not an id")
+    provider.prefetch("what about the logs?", session_id="x")
+    assert "X-Agent-Session-Id" not in stub.calls("GET", "/api/v1/search/")[-1].headers
+
+
 def test_prefetch_empty(stub: StubSpecivo) -> None:
     provider = ready(stub)
     assert provider.prefetch("anything about invoices?", session_id="s1") == ""
