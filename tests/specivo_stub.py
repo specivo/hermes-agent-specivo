@@ -34,6 +34,10 @@ class StubSpecivo:
     #: project -> slug -> page dict (title, slug, text, lock_version)
     pages: dict[str, dict[str, dict[str, Any]]] = field(default_factory=dict)
     comments: list[tuple[str, str]] = field(default_factory=list)
+    #: Open issues the issue list serves: dicts with key, subject, status {name}, and optional tag ids.
+    issues: list[dict[str, Any]] = field(default_factory=list)
+    #: Project tags the tag search serves: dicts with id and name.
+    tags: list[dict[str, Any]] = field(default_factory=list)
     requests: list[Recorded] = field(default_factory=list)
     #: Seconds every request waits before answering.
     delay: float = 0.0
@@ -90,6 +94,18 @@ def _handler(stub: StubSpecivo) -> type[BaseHTTPRequestHandler]:
                 limit = int(query.get("limit", "25"))
                 items = stub.search_items[:limit]
                 return self._answer(200, {"total_count": len(items), "offset": 0, "limit": limit, "items": items})
+            if parts.path.endswith("/issues/") and parts.path.startswith("/api/v1/projects/") and self.command == "GET":
+                tag = query.get("tag_id")
+                matched = [i for i in stub.issues if tag is None or int(tag) in i.get("tag_ids", [])]
+                offset, limit = int(query.get("offset", "0")), int(query.get("limit", "25"))
+                page = matched[offset : offset + limit]
+                items = [{k: v for k, v in i.items() if k != "tag_ids"} for i in page]
+                return self._answer(
+                    200, {"total_count": len(matched), "offset": offset, "limit": limit, "items": items}
+                )
+            if parts.path.endswith("/tags/search/") and self.command == "GET":
+                q = query.get("q", "").casefold()
+                return self._answer(200, [t for t in stub.tags if q in str(t["name"]).casefold()])
             wiki = _WIKI_RE.match(parts.path)
             if wiki:
                 return self._wiki(unquote(wiki.group(1)), unquote(wiki.group(2) or ""), body)

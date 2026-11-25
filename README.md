@@ -367,7 +367,9 @@ What the plugin sends, and where:
 
 - **Your Specivo server only.** The hooks go through the MCP server Hermes connects to. The memory
   provider, when selected, calls Specivo's REST API (`/api/v1/`) with `SPECIVO_API_KEY`, because
-  Hermes's memory loader gives it no MCP access. The plugin makes no other network calls, except
+  Hermes's memory loader gives it no MCP access. The Kanban sync's poll also uses the REST API,
+  marked `X-Agent-Background: 1`: it is the plugin's housekeeping, so Specivo opens no agent
+  session for it and it does not show as a tool call of your conversation. The plugin makes no other network calls, except
   `doctor`'s `GET` on your receiver URL. It has no telemetry. With `usage_report` on, it starts the
   ai-usage reporter, which sends token counts to the same Specivo server.
 - **Session link.** The plugin sends Hermes's session id, the parent session id, and the issue key
