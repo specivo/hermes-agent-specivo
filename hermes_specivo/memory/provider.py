@@ -132,6 +132,7 @@ class SpecivoMemoryProvider(MemoryProviderBase):
         self._scope = Scope(None, None)
         self._agent_context = "primary"
         self._session_kwargs: dict[str, Any] = {}
+        self._session_id: str = ""
         self._sessions: OrderedDict[str, _SessionRecall] = OrderedDict()
         self._lock = threading.Lock()
         self._write_lock = threading.Lock()
@@ -175,6 +176,7 @@ class SpecivoMemoryProvider(MemoryProviderBase):
         return ""
 
     def initialize(self, session_id: str, **kwargs: Any) -> None:
+        self._session_id = session_id
         self._session_kwargs = {
             "cwd": kwargs.get("cwd"),
             "platform": kwargs.get("platform"),
@@ -193,6 +195,9 @@ class SpecivoMemoryProvider(MemoryProviderBase):
             self._scope = Scope(None, None)
             return
         self._client = self._client_factory(settings.url, api_key, self._request_timeout)
+        # Specivo files the calls under this Hermes session, beside its MCP calls and events.
+        if hasattr(self._client, "session_id"):
+            self._client.session_id = self._session_id or None
         kw = self._session_kwargs
         self._scope = resolve_scope(
             settings,
@@ -552,6 +557,7 @@ class SpecivoMemoryProvider(MemoryProviderBase):
         self, new_session_id: str, *, parent_session_id: str = "", reset: bool = False, **kwargs: Any
     ) -> None:
         """Re-read the settings and resolve the project again; a reset forgets the session's recall state."""
+        self._session_id = new_session_id
         self._bind()
         if reset:
             with self._lock:

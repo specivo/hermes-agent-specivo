@@ -371,7 +371,8 @@ What the plugin sends, and where:
   `doctor`'s `GET` on your receiver URL. It has no telemetry. With `usage_report` on, it starts the
   ai-usage reporter, which sends token counts to the same Specivo server.
 - **Session link.** The plugin sends Hermes's session id, the parent session id, and the issue key
-  when there is one.
+  when there is one. The memory provider's REST calls carry the session id too
+  (`X-Agent-Session-Id`), so Specivo files them under the same agent session.
 - **Kanban sync.** The plugin reads issue keys and statuses and puts only the key on a card. It
   posts card summaries and block reasons as issue comments, after Hermes's secret redaction
   (`redact_text` at full strength). If redaction is unavailable or fails, the text is not sent;
