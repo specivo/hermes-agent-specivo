@@ -34,6 +34,7 @@ from .kanban_sync import STATE_KEY as KANBAN_STATE_KEY
 from .mcp import SpecivoError
 from .runtime import Runtime
 from .session_link import SESSIONS_KEY
+from .usage_report import USAGE_STATE_KEY, describe_last_run, resolve_command
 from .webhook import (
     EVENTS,
     TIMEOUT_SECONDS,
@@ -438,6 +439,19 @@ def doctor_checks(
     sync = settings.issue_sync
     if sync.enabled:
         checks.append(Check("ok", f"Kanban sync on: project {settings.sync_project()}, every {sync.poll_seconds}s"))
+
+    usage = settings.usage_report
+    if usage.enabled:
+        last = runtime.state.get(USAGE_STATE_KEY, {}) or {}
+        if resolve_command(usage.command) is None:
+            checks.append(Check("fail", f"usage reporting on, but {usage.command[0]!r} is not found"))
+        else:
+            level = "warn" if last.get("error") or last.get("exit_code") not in (None, 0, 1) else "ok"
+            checks.append(
+                Check(
+                    level, f"usage reporting on, at most every {usage.min_interval_seconds}s: {describe_last_run(last)}"
+                )
+            )
     return checks
 
 
@@ -483,6 +497,13 @@ def run_status(runtime: Runtime, io: Io) -> int:
         last = float(kanban.get("last_poll") or 0)
         say(f"  cards: {summary}")
         say(f"  last poll: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(last)) if last else 'never'}")
+    usage = settings.usage_report
+    say(f"Usage reporting: {'on' if usage.enabled else 'off'}")
+    if usage.enabled:
+        report = runtime.state.get(USAGE_STATE_KEY, {}) or {}
+        started = float(report.get("started") or 0)
+        say(f"  last run: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(started)) if started else 'never'}")
+        say(f"  {describe_last_run(report)}")
     return 0
 
 

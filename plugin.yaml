@@ -58,6 +58,12 @@ config_schema:
     description: >-
       Kanban sync: enabled, project, board, card_assignee, select {assignee, tag}, poll_seconds,
       statuses {in_progress, resolved, feedback}
+  usage_report:
+    type: dict
+    default: {enabled: false}
+    description: >-
+      Run the ai-usage reporter when a session ends: enabled, command (default
+      "ai-usage push --source hermes"), min_interval_seconds (default 300)
   memory:
     type: dict
     default: {}

@@ -143,6 +143,9 @@ All settings live under `plugins.entries.specivo.settings` in `config.yaml`:
 | `issue_sync.card_assignee` | the plugin's profile | Hermes profile the cards are assigned to |
 | `issue_sync.poll_seconds` | `300` | How often to look for new issues, in seconds (15 or more) |
 | `issue_sync.statuses` | `In Progress`, `Resolved`, `Feedback` | `in_progress`, `resolved`, `feedback`: status names or ids for claim, completion and block |
+| `usage_report.enabled` | `false` | Runs the ai-usage reporter when a session ends, so Hermes's AI usage reaches Specivo without a cron job |
+| `usage_report.command` | `ai-usage push --source hermes` | The reporter command line (or a list of strings) |
+| `usage_report.min_interval_seconds` | `300` | At most one run per this many seconds (60 to 86400) |
 
 A bad value makes the hooks go idle, logs one warning naming the key, and makes `doctor` fail
 with the same message.
@@ -330,6 +333,34 @@ Things to know before you choose it:
   search query, the notes the agent chooses to save, and mirrored memory entries when you turn
   mirroring on.
 
+## AI usage reporting
+
+Specivo learns what Hermes spent on models from the
+[ai-usage reporter](https://github.com/specivo/ai-usage-reporter), which reads Hermes's
+`state.db` (its `hermes` source). With `usage_report.enabled: true` the plugin runs it when a
+session ends, so no cron job is needed:
+
+```yaml
+plugins:
+  entries:
+    specivo:
+      settings:
+        usage_report:
+          enabled: true
+          # command: /opt/data/tools/ai-usage-reporter/ai-usage push --source hermes
+```
+
+- The reporter runs as a separate process: Hermes never waits for it. At most one run starts per
+  `min_interval_seconds` (a gateway ends a session after every exchange), never while the last
+  one is still going, and a run is stopped after 10 minutes.
+- It gets `SPECIVO_API_KEY` from the plugin's secret scope, so the usage is reported under the
+  plugin's account. Set up the reporter's `hermes` source and the server URL in its own config
+  (`ai-usage init`).
+- The plugin keeps no reporter output, only when each run started and ended and how. `hermes
+  specivo doctor` and `status` show the last run; the reporter's `ai-usage status` has the details.
+- Usage of a session that never ends (a long-running chat) is sent with the next session that does.
+  A cron job running `ai-usage push` remains a fine backstop.
+
 ## Privacy and network use
 
 What the plugin sends, and where:
@@ -337,7 +368,8 @@ What the plugin sends, and where:
 - **Your Specivo server only.** The hooks go through the MCP server Hermes connects to. The memory
   provider, when selected, calls Specivo's REST API (`/api/v1/`) with `SPECIVO_API_KEY`, because
   Hermes's memory loader gives it no MCP access. The plugin makes no other network calls, except
-  `doctor`'s `GET` on your receiver URL. It has no telemetry.
+  `doctor`'s `GET` on your receiver URL. It has no telemetry. With `usage_report` on, it starts the
+  ai-usage reporter, which sends token counts to the same Specivo server.
 - **Session link.** The plugin sends Hermes's session id, the parent session id, and the issue key
   when there is one.
 - **Kanban sync.** The plugin reads issue keys and statuses and puts only the key on a card. It

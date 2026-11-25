@@ -10,6 +10,7 @@ from __future__ import annotations
 import ipaddress
 import os
 import re
+import shlex
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
@@ -22,6 +23,16 @@ MIN_POLL_SECONDS = 15
 #: Each poll is one ``specivo_list_issues`` call (and one Specivo audit log row): every five minutes
 #: keeps that to 288 a day; a newly assigned issue becomes a card within this time.
 DEFAULT_POLL_SECONDS = 300
+
+#: The ai-usage reporter run when a session ends (``usage_report``): it sends Hermes's usage.
+DEFAULT_USAGE_COMMAND: tuple[str, ...] = ("ai-usage", "push", "--source", "hermes")
+#: At most one run per this many seconds: a gateway ends a session after every exchange.
+DEFAULT_USAGE_INTERVAL = 300
+MIN_USAGE_INTERVAL = 60
+MAX_USAGE_INTERVAL = 86400
+#: A run that takes longer is stopped (the next one sends what it left).
+USAGE_TIMEOUT_SECONDS = 600
+USAGE_REPORT_KEYS = frozenset({"enabled", "command", "min_interval_seconds"})
 
 #: Status names the Kanban sync moves issues to, unless the settings name others (or numeric ids).
 DEFAULT_STATUSES: dict[str, str] = {
@@ -197,6 +208,16 @@ class MemorySettings:
 
 
 @dataclass(frozen=True)
+class UsageReportSettings:
+    """``usage_report``: run the ai-usage reporter when a session ends (off by default)."""
+
+    enabled: bool = False
+    #: The reporter's argv; it gets ``SPECIVO_API_KEY`` from the plugin's secret scope.
+    command: tuple[str, ...] = DEFAULT_USAGE_COMMAND
+    min_interval_seconds: int = DEFAULT_USAGE_INTERVAL
+
+
+@dataclass(frozen=True)
 class Settings:
     """Everything the plugin reads from ``plugins.entries.specivo.settings``."""
 
@@ -207,6 +228,7 @@ class Settings:
     events_enabled: bool = True
     issue_sync: IssueSyncSettings = field(default_factory=IssueSyncSettings)
     memory: MemorySettings = field(default_factory=MemorySettings)
+    usage_report: UsageReportSettings = field(default_factory=UsageReportSettings)
 
     def require_url(self) -> str:
         """The base URL, or a :class:`ConfigError` saying how to set it."""
@@ -309,6 +331,38 @@ def _memory(raw: Mapping[str, Any]) -> MemorySettings:
     )
 
 
+def _usage_report(raw: Mapping[str, Any]) -> UsageReportSettings:
+    prefix = "usage_report"
+    unknown = sorted(str(k) for k in set(raw) - USAGE_REPORT_KEYS)
+    if unknown:
+        raise ConfigError(f"{prefix} has unknown keys {unknown}; use {sorted(USAGE_REPORT_KEYS)}")
+    command_raw = raw.get("command")
+    if command_raw is None:
+        command = DEFAULT_USAGE_COMMAND
+    elif isinstance(command_raw, str):
+        try:
+            command = tuple(shlex.split(command_raw))
+        except ValueError as exc:
+            raise ConfigError(f"{prefix}.command cannot be read: {exc}") from None
+    elif isinstance(command_raw, list) and all(isinstance(part, str) for part in command_raw):
+        command = tuple(command_raw)
+    else:
+        raise ConfigError(f"{prefix}.command must be a command line or a list of strings, got {command_raw!r}")
+    if not command or not command[0].strip():
+        raise ConfigError(f"{prefix}.command must name the reporter, e.g. 'ai-usage push --source hermes'")
+    return UsageReportSettings(
+        enabled=_bool(raw.get("enabled"), f"{prefix}.enabled", False),
+        command=command,
+        min_interval_seconds=_bounded_int(
+            raw.get("min_interval_seconds"),
+            f"{prefix}.min_interval_seconds",
+            DEFAULT_USAGE_INTERVAL,
+            MIN_USAGE_INTERVAL,
+            MAX_USAGE_INTERVAL,
+        ),
+    )
+
+
 def load_settings(get: ConfigGetter) -> Settings:
     """Read and validate the plugin's settings; :class:`ConfigError` names the first bad key.
 
@@ -324,6 +378,7 @@ def load_settings(get: ConfigGetter) -> Settings:
     events = _mapping(get("events", None), "events")
     sync = _mapping(get("issue_sync", None), "issue_sync")
     memory = _mapping(get("memory", None), "memory")
+    usage = _mapping(get("usage_report", None), "usage_report")
     settings = Settings(
         url=url,
         mcp_server=server,
@@ -332,6 +387,7 @@ def load_settings(get: ConfigGetter) -> Settings:
         events_enabled=_bool(events.get("enabled"), "events.enabled", True),
         issue_sync=_issue_sync(sync),
         memory=_memory(memory),
+        usage_report=_usage_report(usage),
     )
     if settings.issue_sync.enabled and settings.sync_project() is None:
         raise ConfigError("issue_sync.enabled is true but no project is set: set issue_sync.project or default_project")
