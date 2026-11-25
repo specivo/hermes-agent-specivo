@@ -69,7 +69,7 @@ def test_defaults_when_nothing_is_configured() -> None:
     assert settings.events_enabled is True
     assert settings.issue_sync.enabled is False
     assert settings.issue_sync.assignee == "me"
-    assert settings.issue_sync.poll_seconds == 60
+    assert settings.issue_sync.poll_seconds == 300
     assert dict(settings.issue_sync.statuses) == DEFAULT_STATUSES
     with pytest.raises(ConfigError, match="hermes specivo setup"):
         settings.require_url()

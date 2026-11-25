@@ -141,7 +141,7 @@ All settings live under `plugins.entries.specivo.settings` in `config.yaml`:
 | `issue_sync.select.tag` | (none) | Also require this tag |
 | `issue_sync.board` | (the board Hermes names) | Only this Kanban board slug; cards are created on it. Recommended: without it, the plugin uses the board each dispatcher tick names |
 | `issue_sync.card_assignee` | the plugin's profile | Hermes profile the cards are assigned to |
-| `issue_sync.poll_seconds` | `60` | How often to look for new issues (15 or more) |
+| `issue_sync.poll_seconds` | `300` | How often to look for new issues, in seconds (15 or more) |
 | `issue_sync.statuses` | `In Progress`, `Resolved`, `Feedback` | `in_progress`, `resolved`, `feedback`: status names or ids for claim, completion and block |
 
 A bad value makes the hooks go idle, logs one warning naming the key, and makes `doctor` fail
@@ -181,7 +181,10 @@ set with an empty `issue_ref`. You can also set it yourself:
 ## Kanban sync
 
 Hermes has no hook for a new Kanban task, so the sync polls on the Kanban dispatcher's tick, at
-most every `poll_seconds`:
+most every `poll_seconds` (five minutes by default). Each poll is one `specivo_list_issues` call,
+which Specivo writes to its audit log: at 300 seconds that is 288 calls a day, at 60 seconds
+1,440. A shorter interval only makes a newly assigned issue become a card sooner; card moves
+reach Specivo at once either way, through the lifecycle hooks below.
 
 | When | The plugin |
 |---|---|

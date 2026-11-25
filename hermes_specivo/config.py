@@ -19,7 +19,9 @@ API_KEY_ENV = "SPECIVO_API_KEY"
 WEBHOOK_SECRET_ENV = "SPECIVO_WEBHOOK_SECRET"  # noqa: S105 - the variable's name, not a secret
 DEFAULT_MCP_SERVER = "specivo"
 MIN_POLL_SECONDS = 15
-DEFAULT_POLL_SECONDS = 60
+#: Each poll is one ``specivo_list_issues`` call (and one Specivo audit log row): every five minutes
+#: keeps that to 288 a day; a newly assigned issue becomes a card within this time.
+DEFAULT_POLL_SECONDS = 300
 
 #: Status names the Kanban sync moves issues to, unless the settings name others (or numeric ids).
 DEFAULT_STATUSES: dict[str, str] = {
