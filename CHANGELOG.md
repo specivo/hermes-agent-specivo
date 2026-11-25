@@ -1,7 +1,8 @@
 # Changelog
 
 Release notes of the Specivo plugin for Hermes Agent. Install a release with
-`hermes plugins install specivo/hermes-agent-specivo --ref <commit>`.
+`hermes plugins install specivo/hermes-agent-specivo --ref vX.Y.Z` (a tag or a commit). Pushing a
+tag `vX.Y.Z` creates its GitHub Release from the section of that version below.
 
 ## 0.2.0
 

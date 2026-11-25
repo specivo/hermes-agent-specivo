@@ -1,0 +1,40 @@
+name: Release
+
+# Pushing a tag vX.Y.Z creates the GitHub Release for it, with the notes of that version from
+# CHANGELOG.md. The tag must match the version in plugin.yaml.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - name: The tag matches the version in plugin.yaml
+        run: |
+          version=$(sed -n 's/^version: *//p' plugin.yaml | head -1)
+          test "v${version}" = "${GITHUB_REF_NAME}" || { echo "tag ${GITHUB_REF_NAME} != v${version}"; exit 1; }
+      - name: Release notes from CHANGELOG.md
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          notes=$(awk -v v="## ${version}" '$0 == v {on = 1; next} /^## / {on = 0} on' CHANGELOG.md)
+          test -n "${notes}" || { echo "CHANGELOG.md has no section for ${version}"; exit 1; }
+          {
+            echo "Install:"
+            echo
+            echo '```bash'
+            echo "hermes plugins install specivo/hermes-agent-specivo --ref ${GITHUB_REF_NAME}"
+            echo '```'
+            echo
+            echo "${notes}"
+          } > release-notes.md
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          body_path: release-notes.md
