@@ -11,6 +11,7 @@ from .memory import SpecivoMemoryProvider
 from .runtime import Runtime
 from .session_link import SessionLink
 from .setup_cmd import add_arguments, make_handler
+from .usage_report import UsageReporter
 
 #: Exactly the hooks ``plugin.yaml`` declares (``provides_hooks``); the catalog checks they match.
 HOOKS: tuple[str, ...] = (
@@ -85,10 +86,15 @@ def register(ctx: Any) -> None:
     runtime = Runtime(ctx)
     link = SessionLink(runtime)
     sync = KanbanSync(runtime)
+    usage = UsageReporter(runtime)
+
+    def on_session_end(**kwargs: Any) -> None:
+        link.on_session_end(**kwargs)
+        usage.on_session_end(**kwargs)
 
     ctx.register_hook("pre_llm_call", link.on_pre_llm_call)
     ctx.register_hook("post_tool_call", link.on_post_tool_call)
-    ctx.register_hook("on_session_end", link.on_session_end)
+    ctx.register_hook("on_session_end", on_session_end)
     ctx.register_hook("on_kanban_dispatch_tick", sync.on_kanban_dispatch_tick)
     ctx.register_hook("kanban_task_claimed", sync.on_task_claimed)
     ctx.register_hook("kanban_task_completed", sync.on_task_completed)
